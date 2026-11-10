@@ -71,9 +71,9 @@ def test_consumer_loans_may_be_assessed_loan_by_loan():
     # a non-performing commercial loan pulls commercial loans to its group, consumer loans to group 2
     mixed = tr.classify([200, 0, 0], borrower=["A", "A", "A"], consumer_loan=[0, 0, 1])
     assert mixed.group.tolist() == [4, 4, 2]
-    # a non-performing consumer loan does not pull the commercial loan into default
+    # a non-performing consumer loan moves the borrower's other loans to group 2, not into default
     other = tr.classify([200, 0, 0], borrower=["A", "A", "A"], consumer_loan=[1, 0, 1])
-    assert other.group.tolist() == [4, 1, 2]
+    assert other.group.tolist() == [4, 2, 2]
 
 
 def test_classification_does_not_depend_on_row_order():
@@ -95,7 +95,7 @@ def test_classification_does_not_depend_on_row_order():
         expect = own[i]
         if not consumer[i] and pulling:
             expect = max(expect, max(pulling))
-        if consumer[i] and expect < 2 and any_npl:
+        if expect < 2 and any_npl:
             expect = 2
         assert base.group[i] == expect
 
@@ -113,6 +113,8 @@ def test_return_to_performing_article_6():
     barred = tr.performing_again(**ok, partially_written_off=True)
     assert not barred.eligible and "6(4)" in barred.unmet[0]
     assert barred.to_dict() == {"eligible": False, "unmet": list(barred.unmet)}
+    with pytest.raises(InputError, match="true or false"):
+        tr.performing_again(**{**ok, "no_amount_past_due": "false"})
 
 
 def test_restructured_non_performing_loan_article_7_5():
@@ -141,6 +143,10 @@ def test_leaving_restructured_status_article_7_6_and_7_8():
     late = dict(full, max_days_past_due_any_loan=31)
     v = tr.exit_restructured_status(months_monitored_in_group_2=12, **late)
     assert not v.eligible and "7(6)(c)" in v.unmet[0]
+    with pytest.raises(InputError):
+        tr.exit_restructured_status(months_monitored_in_group_2=12, **{**full, "financial_difficulty_ended": "no"})
+    with pytest.raises(InputError):
+        tr.exit_restructured_status(months_monitored_in_group_2="12", **full)
 
 
 def test_fixed_rates_for_banks_not_applying_tfrs9():
@@ -149,6 +155,8 @@ def test_fixed_rates_for_banks_not_applying_tfrs9():
     assert [tr.fixed_rate_provision(g, 100)["provision"] for g in (3, 4, 5)] == pytest.approx([20, 50, 100])
     with pytest.raises(InputError):
         tr.fixed_rate_provision(6, 100)
+    with pytest.raises(InputError):
+        tr.fixed_rate_provision(1, -100)
 
 
 def test_collateral_consideration_of_article_15():

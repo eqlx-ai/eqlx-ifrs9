@@ -39,9 +39,10 @@ def test_implied_z_round_trip():
 
 def test_reversion_weights():
     assert cycle.reversion_weights(6, 3) == pytest.approx([1, 1, 1, 0, 0, 0])
-    assert cycle.reversion_weights(8, 3, 4) == pytest.approx([1, 1, 1, 0.75, 0.5, 0.25, 0, 0])
+    assert cycle.reversion_weights(8, 3, 4) == pytest.approx([1, 1, 1, 0.8, 0.6, 0.4, 0.2, 0])
+    assert cycle.reversion_weights(5, 2, 1) == pytest.approx([1, 1, 0.5, 0, 0])  # one transitional year
     assert cycle.reversion_weights(5, 2, method="exponential", decay=0.5) == pytest.approx([1, 1, 0.5, 0.25, 0.125])
-    assert cycle.reversion_weights(2, 0, 2) == pytest.approx([0.5, 0.0])
+    assert cycle.reversion_weights(2, 0, 2) == pytest.approx([2 / 3, 1 / 3])
     with pytest.raises(InputError):
         cycle.reversion_weights(5, -1)
     with pytest.raises(InputError):
@@ -86,8 +87,9 @@ def test_reversion_goes_to_the_long_run_pd_not_to_z_zero():
     yearly = [1 - s[12 * (y + 1)] / s[12 * y] for y in range(6)]
     stressed = float(cycle.conditional_pd(0.02, 0.12, -1.0)[0])
     assert yearly[:2] == pytest.approx([stressed, stressed])
-    assert yearly[2] == pytest.approx(0.5 * stressed + 0.5 * 0.02)
-    assert yearly[3:] == pytest.approx([0.02, 0.02, 0.02])
+    assert yearly[2] == pytest.approx(2 / 3 * stressed + 1 / 3 * 0.02)
+    assert yearly[3] == pytest.approx(1 / 3 * stressed + 2 / 3 * 0.02)
+    assert yearly[4:] == pytest.approx([0.02, 0.02])
 
 
 def test_pit_curve_with_zero_weight_or_zero_correlation_is_the_input():

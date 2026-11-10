@@ -40,29 +40,29 @@ ifrs9 run demo/loans.csv --config demo/settings.json
 ```
 
 ```text
-loans 2,011   exposure 2,828,567,386.34   ECL 102,727,651.27   coverage 3.63%
+loans 2,011   exposure 2,828,567,386.34   ECL 102,343,016.39   coverage 3.62%
 
 stage      loans            exposure    share               ECL  coverage
-1          1,602    2,237,464,647.42    79.1%     12,357,793.30     0.55%
-2            353      453,760,033.72    16.0%     13,361,070.87     2.94%
+1          1,607    2,249,809,211.77    79.5%     12,456,032.90     0.55%
+2            348      441,415,469.37    15.6%     12,878,196.38     2.92%
 3             56      137,342,705.20     4.9%     77,008,787.11    56.07%
 
 stage 2 by primary reason
-  pd_relative                    241      325,253,083.84     11,191,309.94
-  days_past_due_backstop          55       64,521,505.67      1,441,479.13
-  forborne                        29       37,901,342.97        536,260.82
-  watchlist                       27       25,984,101.23        190,225.11
+  pd_relative                    235      309,819,436.40     10,489,482.54
+  days_past_due_backstop          56       67,610,588.76      1,669,616.00
+  forborne                        29       37,901,342.97        530,776.72
+  watchlist                       27       25,984,101.23        186,525.26
   probation                        1          100,000.00          1,795.86
 
 scenarios (ECL if one scenario alone had full weight)
-  base          weight   60%  same stages    94,513,659.98  restaged    92,832,581.87  (50 loans change stage)
-  downside      weight   25%  same stages   132,726,339.74  restaged   142,055,113.01  (330 loans change stage)
-  upside        weight   15%  same stages    85,585,802.36  restaged    83,836,400.27  (151 loans change stage)
-  weighted / base: 1.107
+  base          weight   60%  same stages    94,135,368.37  restaged    92,655,649.27  (53 loans change stage)
+  downside      weight   25%  same stages   132,299,414.92  restaged   142,398,307.48  (336 loans change stage)
+  upside        weight   15%  same stages    85,246,277.60  restaged    83,600,059.51  (149 loans change stage)
+  weighted / base: 1.105
 
 checks
   stage 1 loans whose PD has tripled since origination: 0
-  stage 2 only because of days past due: 55 (14.2% of stage 2 exposure)
+  stage 2 only because of days past due: 56 (15.3% of stage 2 exposure)
   stage 1 kept by the low credit risk exemption: 1
   loans without origination PD: 0
 ```

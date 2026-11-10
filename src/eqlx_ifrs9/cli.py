@@ -124,6 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--loans", type=int, default=2000)
     s.add_argument("--seed", type=int, default=7)
     s.add_argument("--no-profile", action="store_true", help="leave out the Turkey (BDDK) profile")
+    s.add_argument("--force", action="store_true", help="overwrite existing files")
 
     s = sub.add_parser("mcp", help="start the read-only MCP server for AI agents")
     s.add_argument("--root", required=True, help="the only folder the server may read")
@@ -167,6 +168,9 @@ def _dispatch(args: argparse.Namespace) -> int:
     if cmd == "sample":
         out = Path(args.directory)
         out.mkdir(parents=True, exist_ok=True)
+        existing = [f for f in ("loans.csv", "settings.json", "planted_cases.json") if (out / f).exists()]
+        if existing and not args.force:
+            raise InputError(f"{', '.join(existing)} already exist in {out}; use --force to overwrite")
         sample = synthetic.generate(args.loans, args.seed, None if args.no_profile else "tr_bddk")
         (out / "loans.csv").write_text(sample.csv, encoding="utf-8")
         (out / "settings.json").write_text(json.dumps(sample.settings, indent=2) + "\n", encoding="utf-8")

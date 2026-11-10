@@ -60,8 +60,9 @@ def reversion_weights(
 ) -> Array:
     """Weight of the point-in-time PD in each year: 1 inside the forecast horizon, then falling to 0.
 
-    * ``linear``: year ``forecast_years + k`` gets ``max(0, 1 - k / reversion_years)``;
-      ``reversion_years=0`` switches to the long-run PD immediately after the horizon.
+    * ``linear``: there are ``reversion_years`` transitional years; year ``forecast_years + k``
+      gets ``max(0, 1 - k / (reversion_years + 1))``. With ``reversion_years=0`` the long-run PD
+      applies immediately after the horizon; with 1, the first year after it is half-way.
     * ``exponential``: year ``forecast_years + k`` gets ``decay ** k``.
     """
     n = positive_int("n_years", n_years)
@@ -71,7 +72,7 @@ def reversion_weights(
         raise InputError("forecast_years and reversion_years must not be negative")
     k = np.arange(1, n + 1, dtype=np.float64) - h
     if method == "linear":
-        w = np.where(k <= 0, 1.0, np.maximum(0.0, 1.0 - k / r) if r > 0 else 0.0)
+        w = np.where(k <= 0, 1.0, np.maximum(0.0, 1.0 - k / (r + 1.0)))
     elif method == "exponential":
         d = probability("decay", decay)
         w = np.where(k <= 0, 1.0, d ** np.maximum(k, 0.0))

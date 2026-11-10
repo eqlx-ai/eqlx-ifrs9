@@ -104,7 +104,8 @@ class StagingPolicy:
       presumption of 90 days, B5.5.37).
     * ``probation_periods``: after the last trigger has gone, an instrument stays in stage 2 until it
       has shown this many periods without any trigger.
-    * ``cure_periods``: the same for leaving stage 3.
+    * ``cure_periods``: the same for leaving stage 3. An instrument that leaves stage 3 then passes
+      through stage 2 for ``probation_periods`` more periods before it can return to stage 1.
     * ``missing_origination_pd``: what to do without an origination PD. ``"stage2"`` follows 7.2.20
       (lifetime ECL unless low credit risk), ``"skip"`` leaves the PD tests out, ``"error"`` refuses.
     """
@@ -128,6 +129,10 @@ class StagingPolicy:
     precedence: tuple[Reason, ...] = field(default=DEFAULT_PRECEDENCE)
 
     def __post_init__(self) -> None:
+        for name in ("relative_threshold", "absolute_threshold", "backstop_ratio", "low_credit_risk_pd"):
+            v = getattr(self, name)
+            if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))):
+                raise InputError(f"{name} must be a number, got {v!r}")
         for name in ("relative_threshold", "backstop_ratio"):
             v = getattr(self, name)
             if v is not None and not float(v) >= 1.0:
@@ -145,13 +150,23 @@ class StagingPolicy:
             last = upper
         if self.relative_bands and self.relative_threshold is None:
             raise InputError("relative_bands needs relative_threshold for origination PDs above the last band")
-        for name in ("probation_periods", "cure_periods"):
-            if int(getattr(self, name)) < 0:
-                raise InputError(f"{name} must not be negative")
-        for name in ("days_past_due_backstop", "default_days_past_due", "notch_threshold"):
+        for name in ("forborne_is_stage2", "watchlist_is_stage2"):
+            if not isinstance(getattr(self, name), bool):
+                raise InputError(f"{name} must be true or false, got {getattr(self, name)!r}")
+        for name, low in (
+            ("probation_periods", 0),
+            ("cure_periods", 0),
+            ("days_past_due_backstop", 0),
+            ("default_days_past_due", 0),
+            ("notch_threshold", 1),
+            ("max_grade_without_increase", 1),
+            ("low_credit_risk_grade", 1),
+        ):
             v = getattr(self, name)
-            if v is not None and int(v) < 0:
-                raise InputError(f"{name} must not be negative")
+            if v is None and name not in ("probation_periods", "cure_periods"):
+                continue
+            if isinstance(v, bool) or not isinstance(v, int) or v < low:
+                raise InputError(f"{name} must be a whole number of at least {low}, got {v!r}")
         if self.low_credit_risk_pd is not None and not 0.0 < self.low_credit_risk_pd < 1.0:
             raise InputError("low_credit_risk_pd must lie in (0, 1)")
         if set(self.precedence) != set(DEFAULT_PRECEDENCE) or len(self.precedence) != len(DEFAULT_PRECEDENCE):
@@ -330,9 +345,13 @@ def assess(
     bs_orig = orig if backstop_pd_origination is None else _f("backstop_pd_origination", backstop_pd_origination, n, 0)
     lcr_pd = now if low_credit_risk_pd_now is None else _f("low_credit_risk_pd_now", low_credit_risk_pd_now, n, 0)
     dpd = _f("days_past_due", days_past_due, n, 0.0)
+    if np.any(~np.isfinite(dpd)) or np.any(dpd < 0.0):
+        raise InputError("days_past_due must be non-negative numbers")
     g_now = _f("grade_now", grade_now, n, np.nan)
     g_orig = _f("grade_origination", grade_origination, n, np.nan)
     prev = _f("previous_stage", previous_stage, n, 1.0)
+    if np.any(~np.isin(prev, (1.0, 2.0, 3.0))):
+        raise InputError("previous_stage must be 1, 2 or 3")
     clean = _f("periods_without_trigger", periods_without_trigger, n, np.inf)
 
     reasons = np.zeros(n, dtype=np.int64)
@@ -345,25 +364,25 @@ def assess(
     ratio = np.full(n, np.nan)
     np.divide(now, orig, out=ratio, where=usable)
     change = np.where(known, now - orig, np.nan)
-    eps = 1e-12
+    tol = 1.0 - 1e-12  # relative tolerance, so that "exactly at the threshold" counts as reached
 
     rel = np.zeros(n, dtype=bool)
     if policy.relative_threshold is not None:
         thr = np.full(n, float(policy.relative_threshold))
         for upper, r in reversed(policy.relative_bands):
             thr[orig <= upper] = r
-        rel = usable & (now >= thr * orig - eps)
+        rel = usable & (now >= thr * orig * tol)
         rel |= known & (orig == 0.0) & (now > 0.0)
     absolute = np.zeros(n, dtype=bool)
     if policy.absolute_threshold is not None:
-        absolute = known & (now - orig >= policy.absolute_threshold - eps)
+        absolute = known & (now - orig >= policy.absolute_threshold * tol)
     if policy.relative_threshold is not None and policy.absolute_threshold is not None and policy.combine == "and":
         both = rel & absolute
         rel, absolute = both, both
     backstop = np.zeros(n, dtype=bool)
     if policy.backstop_ratio is not None:
         ok = np.isfinite(bs_orig) & (bs_orig > 0.0) & np.isfinite(bs_now)
-        backstop = ok & (bs_now >= policy.backstop_ratio * bs_orig - eps)
+        backstop = ok & (bs_now >= policy.backstop_ratio * bs_orig * tol)
 
     notch = np.zeros(n, dtype=bool)
     if policy.notch_threshold is not None:
@@ -372,13 +391,20 @@ def assess(
     if policy.max_grade_without_increase is not None:
         grade_rule = np.isfinite(g_now) & (g_now > policy.max_grade_without_increase)
 
+    # without the risk at initial recognition no comparison is possible (IFRS 9 7.2.20)
+    unknown = np.zeros(n, dtype=bool)
+    if policy.relative_threshold is not None or policy.absolute_threshold is not None:
+        unknown |= ~known
+    if policy.backstop_ratio is not None:
+        unknown |= ~np.isfinite(bs_orig)
+    if policy.notch_threshold is not None:
+        unknown |= ~np.isfinite(g_orig) & ~known
     missing = np.zeros(n, dtype=bool)
-    needs_pd = policy.relative_threshold is not None or policy.absolute_threshold is not None
-    if needs_pd and np.any(~known):
+    if np.any(unknown):
         if policy.missing_origination_pd == "error":
-            raise InputError(f"{int(np.sum(~known))} instruments have no origination PD")
+            raise InputError(f"{int(np.sum(unknown))} instruments have no origination PD")
         if policy.missing_origination_pd == "stage2":
-            missing = ~known
+            missing = unknown
 
     # ---- low credit risk exemption: switches the PD and grade tests off, nothing else
     exempt = np.zeros(n, dtype=bool)
@@ -412,10 +438,15 @@ def assess(
     # ---- probation and cure: stay where you were until enough clean periods have passed
     stage3_now = (reasons & int(_STAGE3)) != 0
     stage2_now = (reasons & ~int(_STAGE3) & ~int(Reason.LOW_CREDIT_RISK)) != 0
+    curing = np.zeros(n, dtype=bool)
     if policy.cure_periods > 0:
-        flag((prev == 3) & ~stage3_now & (clean < policy.cure_periods), Reason.CURE_PERIOD)
+        curing = (prev == 3) & ~stage3_now & (clean < policy.cure_periods)
+        flag(curing, Reason.CURE_PERIOD)
     if policy.probation_periods > 0:
-        flag((prev == 2) & ~stage3_now & ~stage2_now & (clean < policy.probation_periods), Reason.PROBATION)
+        calm = ~stage3_now & ~stage2_now & ~curing
+        flag((prev == 2) & calm & (clean < policy.probation_periods), Reason.PROBATION)
+        # leaving stage 3 leads through stage 2 first
+        flag((prev == 3) & calm & (clean < policy.cure_periods + policy.probation_periods), Reason.PROBATION)
 
     return finish(reasons, ratio, change, policy.precedence)
 

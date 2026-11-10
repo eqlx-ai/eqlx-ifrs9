@@ -101,6 +101,8 @@ def test_adjusted_generators_are_valid_generators():
         assert m.sum(axis=1) == pytest.approx(np.ones(8)) and np.all(m >= 0)
     with pytest.raises(InputError):
         transitions.generator(JLT, "nope", tol=ROUNDED)  # type: ignore[arg-type]
+    with pytest.raises(InputError, match="negative probabilities"):
+        transitions.generator(JLT, "log", tol=ROUNDED).matrix(1 / 12)  # not repaired silently
     with pytest.raises(InputError):
         transitions.generator(JLT, "wa", tol=ROUNDED).matrix(-1)
 

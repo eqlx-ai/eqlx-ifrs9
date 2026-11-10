@@ -146,9 +146,28 @@ def test_probation_and_cure_periods():
     assert one(p, previous_stage=2, periods_without_trigger=3, **kw)[0] == 1
     assert one(p, previous_stage=1, periods_without_trigger=0, **kw)[0] == 1
     assert one(p, previous_stage=3, periods_without_trigger=11, **kw) == (3, {"cure_period"}, "cure_period")
-    assert one(p, previous_stage=3, periods_without_trigger=12, **kw)[0] == 1
+    # leaving stage 3 leads through stage 2: three more clean periods are needed
+    assert one(p, previous_stage=3, periods_without_trigger=12, **kw) == (2, {"probation"}, "probation")
+    assert one(p, previous_stage=3, periods_without_trigger=15, **kw)[0] == 1
+    assert one(p.with_changes(probation_periods=0), previous_stage=3, periods_without_trigger=12, **kw)[0] == 1
     # a live trigger wins over probation as the primary reason
     assert one(p, previous_stage=2, periods_without_trigger=0, pd_now=0.05, pd_origination=0.02)[2] == "pd_relative"
+
+
+def test_missing_origination_pd_counts_for_the_backstop_and_notch_rules_too():
+    # the default policy has only the threefold backstop: still no comparison without an origination PD
+    assert one(StagingPolicy(), pd_now=0.30, pd_origination=NAN) == (2, {"no_origination_pd"}, "no_origination_pd")
+    notch = StagingPolicy(notch_threshold=2, backstop_ratio=None)
+    assert one(notch, pd_now=0.30, pd_origination=NAN, grade_now=5)[0] == 2
+    assert one(notch, pd_now=0.30, pd_origination=NAN, grade_now=5, grade_origination=5)[0] == 1
+    assert one(StagingPolicy(backstop_ratio=None), pd_now=0.30, pd_origination=NAN)[0] == 1  # no test at all
+
+
+def test_tiny_pds_do_not_trip_the_thresholds():
+    p = StagingPolicy(relative_threshold=2.0)
+    assert one(p, pd_now=1e-13, pd_origination=1e-13)[0] == 1
+    assert one(p, pd_now=2e-13, pd_origination=5e-13)[0] == 1
+    assert one(p, pd_now=2e-13, pd_origination=1e-13)[0] == 2
 
 
 def test_precedence_can_be_changed():
@@ -186,6 +205,11 @@ def test_policy_warnings_follow_public_supervisory_findings():
         {"low_credit_risk_pd": 1.5},
         {"missing_origination_pd": "guess"},
         {"days_past_due_backstop": -3},
+        {"forborne_is_stage2": "False"},
+        {"backstop_ratio": "3"},
+        {"relative_threshold": True},
+        {"probation_periods": 1.5},
+        {"notch_threshold": 0},
     ],
 )
 def test_bad_policies_are_rejected(kw):
@@ -203,6 +227,9 @@ def test_bad_inputs_are_rejected():
         assess(p, pd_now=[0.1], pd_origination=[-0.1])
     with pytest.raises(InputError):
         assess(p, pd_now=[0.1], pd_origination=[0.1], forborne=[True, False])
+    for bad in (dict(days_past_due=[NAN]), dict(days_past_due=[-1]), dict(previous_stage=[7])):
+        with pytest.raises(InputError):
+            assess(p, pd_now=[0.1], pd_origination=[0.1], **bad)
 
 
 def test_vectorised_result_equals_one_by_one():

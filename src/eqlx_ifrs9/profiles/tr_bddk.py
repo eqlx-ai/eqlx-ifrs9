@@ -150,9 +150,10 @@ def classify(
     * ``borrower``: with it, Article 5(5) is applied. If one loan of a borrower is non-performing,
       all loans of that borrower go to the same (worst) non-performing group. Consumer loans may be
       assessed loan by loan: with ``consumer_loans_at_loan_level`` they are only moved to at least
-      group 2, and a non-performing consumer loan does not pull the borrower's other loans into
-      default. The regulation spells this out only for the borrower's *other consumer loans*; for a
-      borrower with both kinds of loan this is a reading of the text, so check your own policy.
+      group 2, and a non-performing consumer loan moves the borrower's other loans, of either kind,
+      to at least group 2 instead of into default. The regulation spells the exception out only for
+      the borrower's *other consumer loans*; for a borrower with both kinds of loan this is a
+      reading of the text, so check your own policy.
     """
     lim = limits or DayLimits()
     d = np.asarray(days_past_due, dtype=np.float64)
@@ -215,14 +216,11 @@ def classify(
             for i in (int(v) for v in ix):
                 if worst and not loan_level[i] and group[i] < worst:
                     group[i] = worst
-                    why[int(i)].append(
-                        f"another loan of the borrower is non-performing: same group {worst} (Art. 5(5))"
-                    )
-                elif loan_level[i] and group[i] < 2 and (worst or (any_npl and own[i] < 3)):
+                    why[i].append(f"another loan of the borrower is non-performing: same group {worst} (Art. 5(5))")
+                elif any_npl and group[i] < 2:
                     group[i] = 2
-                    why[int(i)].append(
-                        "consumer loan of a borrower with a non-performing loan: not group 1 (Art. 5(5))"
-                    )
+                    kind = "consumer loan" if loan_level[i] else "loan"
+                    why[i].append(f"{kind} of a borrower with a non-performing loan: not group 1 (Art. 5(5))")
 
     g8 = group.astype(np.int8)
     return Classification(g8, stage_from_group(g8), tuple(tuple(w) for w in why))
@@ -240,7 +238,22 @@ class Eligibility:
         return {"eligible": self.eligible, "unmet": list(self.unmet)}
 
 
+def _booleans(*values: object) -> None:
+    for v in values:
+        if not isinstance(v, bool):
+            raise InputError(f"yes/no facts must be true or false, got {v!r}")
+
+
+def _numbers(*values: object) -> None:
+    for v in values:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v) or v < 0:
+            raise InputError(f"amounts and periods must be non-negative numbers, got {v!r}")
+
+
 def _verdict(conditions: Sequence[tuple[bool, str]]) -> Eligibility:
+    for ok, _ in conditions:
+        if not isinstance(ok, (bool, np.bool_)):
+            raise InputError(f"conditions must be true or false, got {ok!r}")
     unmet = tuple(text for ok, text in conditions if not ok)
     return Eligibility(not unmet, unmet)
 
@@ -256,6 +269,15 @@ def performing_again(
     repaid_in_kind: bool = False,
 ) -> Eligibility:
     """May a non-performing loan be reclassified as performing? (Article 6(3) and 6(4))"""
+    _booleans(
+        arrears_collected_without_collateral,
+        no_amount_past_due,
+        last_two_payments_on_time,
+        meets_group_1_or_2,
+        partially_written_off,
+        collateral_taken_over,
+        repaid_in_kind,
+    )
     return _verdict(
         [
             (not partially_written_off, "partially written off: cannot be reclassified as performing (Art. 6(4))"),
@@ -281,6 +303,8 @@ def restructured_npl_to_group_2(
     arrears_and_written_off_principal_collected: bool,
 ) -> Eligibility:
     """May a restructured non-performing loan move to group 2 as a restructured loan? (Article 7(5))"""
+    _booleans(non_performing_conditions_gone, no_delay_and_no_doubt, arrears_and_written_off_principal_collected)
+    _numbers(months_as_non_performing_since_restructuring)
     return _verdict(
         [
             (
@@ -318,6 +342,8 @@ def exit_restructured_status(
     that came back from non-performing status under Article 7(5); this function follows that
     reading (``came_from_non_performing=True`` keeps the one-year rule).
     """
+    _booleans(financial_difficulty_ended, applies_tfrs9, came_from_non_performing)
+    _numbers(months_monitored_in_group_2, share_of_remaining_debt_repaid, max_days_past_due_any_loan)
     short = applies_tfrs9 and not came_from_non_performing
     conditions = [
         (
@@ -378,6 +404,8 @@ def fixed_rate_provision(group: int, amount: float, collateral: Sequence[tuple[i
     collateral (Articles 11 and 15). The exclusions of Article 10(4) and the Board's power to ask
     for more are not modelled.
     """
+    if isinstance(amount, bool) or not np.isfinite(float(amount)) or float(amount) < 0.0:
+        raise InputError("the amount must be a non-negative number")
     if group in GENERAL_PROVISION_RATE:
         rate = GENERAL_PROVISION_RATE[group]
         return {

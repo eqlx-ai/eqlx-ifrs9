@@ -129,9 +129,10 @@ def annuity(
         start = b * (1.0 - t / n)
         pay = b / n
     else:
-        g = (1.0 + i) ** n
-        start = b * (g - (1.0 + i) ** t) / (g - 1.0)
-        pay = b * i / (1.0 - (1.0 + i) ** (-n))
+        # (g - (1+i)^t) / (g - 1) with g = (1+i)^n, written so that tiny rates do not cancel
+        log_growth = np.log1p(i)
+        start = b * (1.0 - np.expm1(t * log_growth) / np.expm1(n * log_growth))
+        pay = b * i / -np.expm1(-n * log_growth)
     interest = start * i
     return Schedule(start, interest, pay - interest, k)
 

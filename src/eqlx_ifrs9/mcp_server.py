@@ -220,6 +220,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         timing: Literal["end", "mid"] = "end",
         z_by_year: list[float] | None = None,
         rho: float = 0.0,
+        reversion_years: int = 0,
         periods: bool = False,
     ) -> dict[str, Any]:
         """12-month and lifetime ECL of one instrument from plain numbers (no file).
@@ -227,7 +228,8 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         Rates and PDs are fractions (0.05 = 5%). Give `pd_12m` (constant hazard) or `cumulative_pd` (cumulative
         PD at the end of each period, `cumulative_pd_frequency` periods a year). `eir` is the effective
         interest rate used for discounting; `rate` the contract rate of the repayment schedule (defaults to
-        eir). `z_by_year` with `rho` shifts a long-run PD with the one-factor model (z > 0 good year).
+        eir). `z_by_year` with `rho` shifts a long-run PD with the one-factor model (z > 0 good year); after
+        the last year given, the PD reverts to the long-run PD over `reversion_years` transitional years.
         """
         return calc.instrument_ecl(
             balance=balance,
@@ -245,6 +247,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
             timing=timing,
             z_by_year=z_by_year,
             rho=rho,
+            reversion_years=reversion_years,
             periods=periods,
         )
 
