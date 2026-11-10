@@ -1,0 +1,23 @@
+name: New calculation or rule profile
+description: Propose a calculation, a staging rule or a jurisdiction profile.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What should be computed
+      description: The formula or rule in words, and the choices it leaves to the user.
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Public source
+      description: Paragraph of the standard, regulation article or paper. Nothing confidential.
+    validations:
+      required: true
+  - type: textarea
+    id: check
+    attributes:
+      label: How it can be verified
+      description: A published example, a closed form, an enumeration or a simulation that does not share the implementation.

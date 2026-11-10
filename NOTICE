@@ -1,0 +1,6 @@
+eqlx-ifrs9
+Copyright 2026 Can Demir (eqlx.ai)
+
+Calculations follow IFRS 9 Financial Instruments (IFRS Foundation), public supervisory guidance and
+the academic papers listed in the README. Figures from published examples are used as test values
+with their source. No third-party code or data is included; the sample portfolio is made up.
