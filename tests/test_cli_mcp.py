@@ -295,3 +295,75 @@ def test_mcp_reports_input_errors(root):
     assert call(server, "turkey_reclassification_check", {"check": "performing_again", "facts": {"x": 1}}).is_error
     with pytest.raises(NotADirectoryError):
         build_server(root / "loans.csv")
+
+
+# --- regressions from review --------------------------------------------------------------------
+
+
+def test_calculator_reverts_to_the_long_run_pd_like_the_portfolio_run():
+    kw = dict(balance=1000, lgd=0.45, eir=0.06, remaining_months=36, pd_12m=0.02, z_by_year=[-1.0], rho=0.12)
+    stressed = calc.instrument_ecl(**kw)
+    assert stressed["lifetime_pd"] == pytest.approx(1 - (1 - 0.034377) * 0.98**2, abs=1e-6)
+    assert calc.instrument_ecl(**kw, reversion_years=1)["lifetime_pd"] > stressed["lifetime_pd"]
+
+
+def test_calculator_default_schedule_is_priced_at_the_effective_rate():
+    res = calc.instrument_ecl(
+        balance=1000, lgd=1.0, eir=0.48, remaining_months=36, pd_12m=0.02, amortization="annuity", periods=True
+    )
+    first_month_interest = 1000 * (1.48 ** (1 / 12) - 1)
+    second = res["periods"][1]["ead"]
+    quoted = calc.instrument_ecl(
+        balance=1000,
+        lgd=1.0,
+        eir=0.48,
+        rate=0.48,
+        remaining_months=36,
+        pd_12m=0.02,
+        amortization="annuity",
+        periods=True,
+    )
+    assert second < quoted["periods"][1]["ead"]  # less interest, so more principal is repaid in month 1
+    assert first_month_interest == pytest.approx(33.2, abs=0.1)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [dict(cpr=-0.5), dict(rho=5.0), dict(z_by_year=[]), dict(remaining_months=12.9), dict(remaining_months=0)],
+)
+def test_calculator_rejects_values_out_of_range(bad):
+    kw = dict(balance=1000, lgd=0.45, eir=0.06, remaining_months=36, pd_12m=0.02)
+    with pytest.raises(InputError):
+        calc.instrument_ecl(**{**kw, **bad})
+
+
+def test_sample_does_not_overwrite(folder, capsys):
+    code, _, err = run(capsys, "sample", folder)
+    assert code == 2 and "already exist" in err
+    assert run(capsys, "sample", folder, "--loans", 150, "--force")[0] == 0
+
+
+def test_misspelt_settings_are_refused_on_the_command_line(folder, capsys):
+    base = ["run", folder / "loans.csv", "--config", folder / "settings.json"]
+    code, _, err = run(capsys, *base, "--set", "staging.forborne_is_stage2=False")
+    assert code == 2 and "true or false" in err
+    code, _, err = run(capsys, *base, "--set", "staging=5")
+    assert code == 2 and "must be an object" in err
+    code, _, err = run(capsys, *base, "--set", "staging.backstop_ratio=3,5")
+    assert code == 2 and "must be a number" in err
+    listed = folder / "list.json"
+    listed.write_text("[1, 2]")
+    assert run(capsys, "run", folder / "loans.csv", "--config", listed)[0] == 2
+
+
+def test_mcp_yes_no_facts_must_be_booleans(root):
+    facts = {
+        "months_monitored_in_group_2": 2,
+        "share_of_remaining_debt_repaid": 0.0,
+        "max_days_past_due_any_loan": 0,
+        "financial_difficulty_ended": "false",
+    }
+    res = call(
+        build_server(root), "turkey_reclassification_check", {"check": "exit_restructured_status", "facts": facts}
+    )
+    assert res.is_error

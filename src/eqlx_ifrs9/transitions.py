@@ -122,7 +122,11 @@ class Generator:
         if not years >= 0.0:
             raise InputError("years must not be negative")
         m = np.asarray(expm(self.q * float(years)), dtype=np.float64)
-        m = np.clip(m, 0.0, 1.0)
+        if m.min() < -1e-9:
+            raise InputError(
+                f"the '{self.method}' generator gives negative probabilities; use an adjusted generator ('wa' or 'da')"
+            )
+        m = np.clip(m, 0.0, 1.0)  # rounding noise only
         return np.asarray(m / m.sum(axis=1, keepdims=True), dtype=np.float64)
 
 

@@ -146,6 +146,15 @@ def _choice(obj: dict[str, Any], key: str, allowed: tuple[str, ...], default: st
     return v
 
 
+def _object(obj: dict[str, Any], key: str) -> dict[str, Any]:
+    v = obj.get(key)
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise InputError(f"{key} must be an object")
+    return dict(v)
+
+
 def _unknown(obj: dict[str, Any], allowed: set[str], where: str) -> None:
     extra = sorted(set(obj) - allowed)
     if extra:
@@ -191,12 +200,12 @@ def _segment(name: str, raw: Any) -> Segment:
 
 def from_dict(raw: dict[str, Any] | None) -> Config:
     """Build a :class:`Config`, rejecting anything misspelled or out of range."""
-    obj = dict(raw or {})
-    if not isinstance(raw, dict) and raw is not None:
+    if raw is not None and not isinstance(raw, dict):
         raise InputError("the settings must be a JSON object")
+    obj = dict(raw or {})
     _unknown(obj, _TOP_KEYS, "the settings")
 
-    st = dict(obj.get("staging") or {})
+    st = _object(obj, "staging")
     _unknown(st, _POLICY_KEYS | {"pd_measure", "scenario_basis"}, "staging")
     pd_measure = _choice(st, "pd_measure", ("annualized_lifetime", "lifetime", "twelve_month"), "annualized_lifetime")
     scenario_basis = _choice(st, "scenario_basis", ("weighted", "base"), "weighted")
@@ -208,7 +217,9 @@ def from_dict(raw: dict[str, Any] | None) -> Config:
             raise InputError("staging.relative_bands must be a list of [upper origination PD, ratio]") from exc
     try:
         policy = StagingPolicy(**kw)
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, InputError):
+            raise InputError(f"staging: {exc}") from None
         raise InputError(f"staging: {exc}") from exc
 
     raw_scen = obj.get("scenarios")
@@ -246,7 +257,7 @@ def from_dict(raw: dict[str, Any] | None) -> Config:
     if base not in names:
         raise InputError(f"base_scenario must name one of the scenarios ({', '.join(names)})")
 
-    fc = dict(obj.get("forecast") or {})
+    fc = _object(obj, "forecast")
     _unknown(fc, {"reversion_years", "method", "decay"}, "forecast")
     rev = fc.get("reversion_years", 0)
     if isinstance(rev, bool) or not isinstance(rev, int) or rev < 0:
@@ -261,8 +272,14 @@ def from_dict(raw: dict[str, Any] | None) -> Config:
     profile = obj.get("profile")
     if profile not in (None, "tr_bddk"):
         raise InputError(f"unknown profile {profile!r}; available: tr_bddk")
-    options = dict(obj.get("profile_options") or {})
+    options = _object(obj, "profile_options")
     _unknown(options, {"days_in_year", "consumer_loans_at_loan_level", "as_of"}, "profile_options")
+    if options.get("days_in_year", 365) not in (360, 365, 366) or isinstance(options.get("days_in_year"), bool):
+        raise InputError("profile_options.days_in_year must be 360, 365 or 366")
+    if not isinstance(options.get("consumer_loans_at_loan_level", True), bool):
+        raise InputError("profile_options.consumer_loans_at_loan_level must be true or false")
+    if not isinstance(options.get("as_of", ""), str):
+        raise InputError("profile_options.as_of must be a date like 2026-12-31")
 
     pd_basis = obj.get("pd_basis")
     if pd_basis not in (None, "long_run", "current"):

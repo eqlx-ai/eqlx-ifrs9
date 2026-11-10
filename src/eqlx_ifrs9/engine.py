@@ -168,6 +168,17 @@ def _prepare(loans: Loans, config: Config) -> _Prepared:
     for si, seg in enumerate(segments):
         rows = np.nonzero(seg_index == si)[0]
         if not seg.grades:
+            if np.any(loans.text["grade"][rows] != "") or np.any(loans.text["grade_origination"][rows] != ""):
+                p = config.policy
+                if (
+                    p.notch_threshold is not None
+                    or p.max_grade_without_increase is not None
+                    or p.low_credit_risk_grade is not None
+                ):
+                    raise InputError(
+                        f"the staging policy uses grades, but segment {seg.name!r} defines no 'grades' to order them"
+                    )
+                warnings.append(f"segment {seg.name!r} defines no grades: the grade columns of its loans are not used")
             continue
         lookup = {g: i for i, g in enumerate(seg.grades)}
         for col, target in (("grade", grade), ("grade_origination", grade_orig)):
@@ -192,9 +203,21 @@ def _prepare(loans: Loans, config: Config) -> _Prepared:
         )
     if np.any(has_pd & has_matrix & (grade >= 0)):
         warnings.append("some loans have both pd_12m and a grade with a matrix: pd_12m was used for the PD curve")
+    # A contract rate is read under the rate convention. Without one the schedule uses the effective
+    # interest rate as an effective rate, which is how the same rate is used for discounting.
     eir = loans.num["eir"]
-    rate = np.where(np.isnan(loans.num["rate"]), eir, loans.num["rate"])
-    rate_month = rate / MONTHS if config.rate_convention == "nominal" else (1.0 + rate) ** (1.0 / MONTHS) - 1.0
+    rate = loans.num["rate"]
+    effective = (config.rate_convention == "effective") | np.isnan(rate)
+    rate = np.where(np.isnan(rate), eir, rate)
+    rate_month = np.where(effective, (1.0 + rate) ** (1.0 / MONTHS) - 1.0, rate / MONTHS)
+    needs_rho = any(s.z is not None for s in config.scenarios)
+    if needs_rho and "*" not in config.segments:
+        loose = sorted(nm for nm in names if nm not in config.segments)
+        if loose:
+            raise InputError(
+                f"segment(s) {', '.join(loose)} in the loan file have no entry under 'segments' (and there is no "
+                "'*' entry): their asset correlation is unknown, so the scenarios cannot be applied"
+            )
     pd_long_run = loans.num["pd_12m"].copy()
     if config.pd_basis == "current":
         # PD(z0) = Phi((x - sqrt(rho) z0) / sqrt(1 - rho))  =>  long-run PD = Phi(x)
@@ -242,8 +265,8 @@ def _ead_matrix(loans: Loans, prep: _Prepared, config: Config, rows: NDArray[np.
         if np.any(zero):
             start[zero] = (bal * (1.0 - t / n))[zero]
         if np.any(pos):
-            g = (1.0 + i[pos]) ** n[pos]
-            start[pos] = bal[pos] * (g - (1.0 + i[pos]) ** np.minimum(t, n[pos])) / (g - 1.0)
+            growth = np.log1p(i[pos])
+            start[pos] = bal[pos] * (1.0 - np.expm1(np.minimum(t, n[pos]) * growth) / np.expm1(n[pos] * growth))
     start = np.maximum(start, 0.0)
     # column t is the balance at the start of month t+1; the balance at the end of the last month is 0
     beyond = t >= n
@@ -423,6 +446,13 @@ def run(loans: Loans, config: Config) -> PortfolioResult:
             "a single scenario is used: the result is probability-weighted only if losses are linear in "
             "the economy (IFRS 9 5.5.17(a))"
         )
+    if policy.probation_periods > 0 or policy.cure_periods > 0:
+        lacking = (loans.num["previous_stage"] >= 2) & np.isnan(loans.num["periods_without_trigger"])
+        if np.any(lacking):
+            warnings.append(
+                f"{int(lacking.sum())} loans were in stage 2 or 3 before but have no periods_without_trigger: "
+                "probation and cure periods are not applied to them"
+            )
     if np.any(np.isnan(orig_life)):
         warnings.append(f"{int(np.isnan(orig_life).sum())} loans have no origination PD or grade")
 
@@ -576,7 +606,8 @@ def loan_schedule(loans: Loans, config: Config, i: int) -> schedule.Schedule:
     builder = {"bullet": schedule.bullet, "annuity": schedule.annuity, "equal_principal": schedule.equal_principal}[
         kind
     ]
-    sched = builder(bal, rate, rem, MONTHS, config.rate_convention)
+    convention = "effective" if np.isnan(one.num["rate"][0]) else config.rate_convention
+    sched = builder(bal, rate, rem, MONTHS, convention)
     if prep.cpr[0] > 0.0:
         sched = schedule.with_prepayment(sched, float(prep.cpr[0]))
     return sched

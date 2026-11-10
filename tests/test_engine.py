@@ -143,6 +143,49 @@ def test_single_loan_reproduces_the_closed_form():
     assert any("single scenario" in w for w in known.warnings)
 
 
+def test_default_contract_rate_is_consistent_with_the_discounting():
+    # no contract rate: the instalments are priced at the effective interest rate, so their present
+    # value at the discount factors of the run is the balance
+    loans = one_loan(amortization="annuity", eir=0.48)
+    sched = engine.loan_schedule(loans, config.from_dict({}), 0)
+    months = np.arange(1, 37)
+    assert float(np.sum(sched.payment * 1.48 ** (-months / 12))) == pytest.approx(1000.0)
+    # a contract rate, when given, is nominal by default
+    quoted = engine.loan_schedule(one_loan(amortization="annuity", eir=0.48, rate=0.48), config.from_dict({}), 0)
+    assert quoted.interest[0] == pytest.approx(1000 * 0.04) and sched.interest[0] == pytest.approx(
+        1000 * (1.48 ** (1 / 12) - 1)
+    )
+
+
+def test_tiny_contract_rate_does_not_break_the_run():
+    for rate in (1e-15, 1e-17, 0.0):
+        res = engine.run(one_loan(amortization="annuity", rate=rate, pd_12m_origination=0.02), config.from_dict({}))
+        assert np.isfinite(res.ecl[0]) and res.ecl_lifetime[0] == pytest.approx(
+            engine.loan_detail(res, "A")["weighted"]["lifetime_ecl"]
+        )
+
+
+def test_segments_must_be_configured_when_scenarios_shift_pds():
+    scen = {"pd_basis": "long_run", "scenarios": [{"name": "s", "weight": 1.0, "z": [-2.5]}]}
+    with pytest.raises(InputError, match="no entry under 'segments'"):
+        engine.run(one_loan(segment="Corporate"), config.from_dict({**scen, "segments": {"corporate": {"rho": 0.2}}}))
+    engine.run(one_loan(segment="Corporate"), config.from_dict({**scen, "segments": {"*": {"rho": 0.2}}}))
+    engine.run(one_loan(segment="Corporate"), config.from_dict({}))  # nothing to shift: no correlation needed
+
+
+def test_grades_without_a_grade_scale():
+    loans = one_loan(grade="7", grade_origination="1", pd_12m_origination=0.02)
+    with pytest.raises(InputError, match="defines no 'grades'"):
+        engine.run(loans, config.from_dict({"staging": {"notch_threshold": 2}}))
+    assert any("grade columns" in w for w in engine.run(loans, config.from_dict({})).warnings)
+
+
+def test_probation_without_history_is_reported():
+    cfg = config.from_dict({"staging": {"relative_threshold": 2.0, "probation_periods": 3}})
+    res = engine.run(one_loan(pd_12m_origination=0.02, previous_stage=2), cfg)
+    assert res.stage[0] == 1 and any("periods_without_trigger" in w for w in res.warnings)
+
+
 def test_life_under_twelve_months():
     res = engine.run(one_loan(remaining_months=6, pd_12m_origination=0.02), config.from_dict({}))
     assert res.ecl_12m[0] == res.ecl_lifetime[0] == pytest.approx(4.446772038869, abs=1e-9)

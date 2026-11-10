@@ -37,6 +37,7 @@ def instrument_ecl(
     ead_basis: Literal["start", "start_plus_interest", "mid"] = "start",
     z_by_year: Sequence[float] | None = None,
     rho: float = 0.0,
+    reversion_years: int = 0,
     periods: bool = False,
 ) -> dict[str, Any]:
     """12-month and lifetime ECL of one instrument, on monthly periods.
@@ -44,11 +45,18 @@ def instrument_ecl(
     The PD comes either from ``pd_12m`` (constant hazard) or from ``cumulative_pd``, a list of
     cumulative PDs at the end of each period (``cumulative_pd_frequency`` periods a year; annual or
     quarterly points are refined to months with a constant hazard inside each period). With
-    ``z_by_year`` the curve is read as long-run and shifted year by year (z > 0 good year).
+    ``z_by_year`` the curve is read as long-run and shifted year by year (z > 0 good year); after
+    the last year given the PD reverts to the long-run PD over ``reversion_years`` transitional
+    years, as in the portfolio run. ``rate`` is the contract rate (nominal, divided by 12); without
+    it the schedule uses ``eir`` as an effective rate.
     """
+    if isinstance(remaining_months, bool) or int(remaining_months) != remaining_months or remaining_months < 1:
+        raise InputError("remaining_months must be a whole number of at least 1")
     n = int(remaining_months)
-    if n < 1:
-        raise InputError("remaining_months must be at least 1")
+    if not 0.0 <= cpr <= 1.0:
+        raise InputError("cpr must lie in [0, 1]")
+    if not 0.0 <= rho < 1.0:
+        raise InputError("rho must lie in [0, 1)")
     if (pd_12m is None) == (cumulative_pd is None):
         raise InputError("give either pd_12m or cumulative_pd")
     if pd_12m is not None:
@@ -61,13 +69,18 @@ def instrument_ecl(
         curve = raw.truncate(n)
         source = "cumulative PD curve"
     if z_by_year is not None:
-        curve = cycle.pit_curve(curve, rho, list(z_by_year))
+        z = list(z_by_year)
+        if not z:
+            raise InputError("z_by_year is empty")
+        weights = cycle.reversion_weights(-(-n // MONTHS), len(z), reversion_years)
+        curve = cycle.pit_curve(curve, rho, z, weights)
         source += ", shifted with the one-factor model"
     contract = eir if rate is None else rate
+    convention: Literal["nominal", "effective"] = "effective" if rate is None else "nominal"
     builder = {"bullet": schedule.bullet, "annuity": schedule.annuity, "equal_principal": schedule.equal_principal}
     if amortization not in builder:
         raise InputError("amortization must be bullet, annuity or equal_principal")
-    sched = builder[amortization](balance, contract, n, MONTHS)
+    sched = builder[amortization](balance, contract, n, MONTHS, convention)
     if cpr > 0.0:
         sched = schedule.with_prepayment(sched, cpr)
     ead = sched.ead(ead_basis) + schedule.commitment_ead(0.0, undrawn, ccf)[0]

@@ -52,12 +52,32 @@ def test_flags_text_case_and_byte_order_mark(tmp_path):
         (f"{HEAD},forborne\nA,1,0.1,3,0.5,0.1,maybe\n", "yes/no"),
         (f"{HEAD},product\nA,1,0.1,3,0.5,0.1,lease\n", "not one of term"),
         (f"{HEAD},balance\nA,1,0.1,3,0.5,0.1,2\n", "duplicate column"),
-        (f"{HEAD}\nA,1,0.1,3,0.5,nan\n", "neither pd_12m"),
+        (f"{HEAD}\nA,1,0.1,3,0.5,nan\n", "'nan' is not a number"),
+        (f"{HEAD}\nA,inf,0.1,3,0.5,0.1\n", "'inf' is not a number"),
+        (f"{HEAD}\nA,1e400,0.1,3,0.5,0.1\n", "too large"),
+        (f"{HEAD}\nA,1_000,0.1,3,0.5,0.1\n", "'1_000' is not a number"),
+        (f"{HEAD}\nA,\u0661\u0660,0.1,3,0.5,0.1\n", "is not a number"),
+        (f"{HEAD},dpd\nA,1,0.1,3,0.5,0.1,30.9\n", "whole number"),
+        (f"{HEAD},undrawn\nA,1,0.1,3,0.5,0.1,nan\n", "is not a number"),
+        (f"{HEAD}\n\n  , , , , , \nA,1,0.1,3,0.5,abc\n", "row 4, column pd_12m"),
     ],
 )
 def test_bad_files_stop_with_the_row(text, message):
     with pytest.raises(InputError, match=message):
         data.from_text(text)
+
+
+def test_scientific_notation_quotes_and_windows_line_endings():
+    loans = data.from_text(f'{HEAD}\r\n"A",1e3,6E-2,36,.45,2e-2\r\n')
+    assert loans.num["balance"].tolist() == [1000.0] and loans.num["lgd"].tolist() == [0.45]
+    assert data.from_text(f"\ufeff{HEAD}\nA,1,0.1,3,0.5,0.1\n").n == 1
+
+
+def test_file_that_is_not_utf8(tmp_path):
+    p = tmp_path / "latin.csv"
+    p.write_bytes((HEAD + "\n\xe7,1,0.1,3,0.5,0.1\n").encode("latin-1"))
+    with pytest.raises(InputError, match="not UTF-8"):
+        data.read_csv(p)
 
 
 def test_row_limit():
@@ -120,6 +140,17 @@ def test_segments_fall_back_to_star():
             "negative probabilities",
         ),
         ({"segments": []}, "segments must be"),
+        ({"staging": {"forborne_is_stage2": "False"}}, "true or false"),
+        ({"staging": {"backstop_ratio": "3"}}, "must be a number"),
+        ({"staging": {"relative_threshold": True}}, "must be a number"),
+        ({"staging": {"probation_periods": 1.5}}, "whole number"),
+        ({"staging": {"notch_threshold": 0}}, "at least 1"),
+        ({"staging": 5}, "staging must be an object"),
+        ({"forecast": [1]}, "forecast must be an object"),
+        ({"profile_options": {"days_in_year": "abc"}}, "days_in_year"),
+        ({"profile_options": {"days_in_year": 365.9}}, "days_in_year"),
+        ({"profile_options": {"consumer_loans_at_loan_level": "false"}}, "true or false"),
+        ([1, 2], "JSON object"),
     ],
 )
 def test_bad_settings_are_rejected(raw, message):

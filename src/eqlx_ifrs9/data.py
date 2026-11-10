@@ -10,7 +10,9 @@ Required columns
 
 Optional columns
     ``borrower_id``, ``segment``, ``product`` (term | revolving), ``amortization``
-    (bullet | annuity | equal_principal), ``rate`` (contract rate; defaults to ``eir``), ``undrawn``,
+    (bullet | annuity | equal_principal), ``rate`` (contract rate of the repayment schedule, read under
+    the ``rate_convention`` setting; without it the schedule uses ``eir`` as an effective rate, so
+    that it is consistent with the discounting), ``undrawn``,
     ``ccf`` and ``ccf_12m`` (share of the undrawn limit expected to be drawn over the remaining life
     / within 12 months), ``months_on_book``, ``lgd_default`` (loss rate once credit-impaired),
     origination risk as one of ``pd_origination_remaining`` (lifetime PD expected at origination for
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,13 +39,13 @@ from .errors import InputError
 REQUIRED = ("loan_id", "balance", "eir", "remaining_months", "lgd")
 NUMERIC: dict[str, tuple[float, float, float]] = {
     # name: (default, min, max); NaN default means "not given"
-    "balance": (np.nan, 0.0, np.inf),
+    "balance": (np.nan, 0.0, 1e18),
     "eir": (np.nan, -0.99, 100.0),
     "remaining_months": (np.nan, 1.0, 1200.0),
     "lgd": (np.nan, 0.0, 1.0),
     "pd_12m": (np.nan, 0.0, 1.0),
     "rate": (np.nan, -0.99, 100.0),
-    "undrawn": (0.0, 0.0, np.inf),
+    "undrawn": (0.0, 0.0, 1e18),
     "ccf": (0.0, 0.0, 1.0),
     "ccf_12m": (np.nan, 0.0, 1.0),
     "months_on_book": (0.0, 0.0, 1200.0),
@@ -54,7 +57,8 @@ NUMERIC: dict[str, tuple[float, float, float]] = {
     "periods_without_trigger": (np.nan, 0.0, 100000.0),
     "judgement_group": (np.nan, 1.0, 5.0),
 }
-WHOLE = {"remaining_months", "months_on_book", "previous_stage", "judgement_group"}
+WHOLE = {"remaining_months", "months_on_book", "previous_stage", "judgement_group", "dpd", "periods_without_trigger"}
+_NUMBER = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", re.ASCII)
 FLAGS = (
     "forborne",
     "watchlist",
@@ -98,9 +102,7 @@ class Loans:
                 out[c] = str(self.text[c][i])
             elif c in self.num:
                 v = float(self.num[c][i])
-                out[c] = (
-                    None if np.isnan(v) else (int(v) if c in WHOLE or c in ("dpd", "periods_without_trigger") else v)
-                )
+                out[c] = None if np.isnan(v) else (int(v) if c in WHOLE else v)
             else:
                 out[c] = bool(self.flag[c][i])
         return out
@@ -118,8 +120,11 @@ class Loans:
 def read_csv(source: str | Path | io.TextIOBase, max_rows: int = 5_000_000) -> Loans:
     """Read a loan file from a path or an open text stream."""
     if isinstance(source, (str, Path)):
-        with open(source, newline="", encoding="utf-8-sig") as fh:
-            return _read(fh, max_rows)
+        try:
+            with open(source, newline="", encoding="utf-8-sig") as fh:
+                return _read(fh, max_rows)
+        except UnicodeDecodeError as exc:
+            raise InputError(f"{source}: the loan file is not UTF-8 text ({exc.reason})") from exc
     return _read(source, max_rows)
 
 
@@ -130,7 +135,7 @@ def from_text(text: str, max_rows: int = 5_000_000) -> Loans:
 def _read(fh: io.TextIOBase, max_rows: int) -> Loans:
     reader = csv.reader(fh)
     try:
-        header = [h.strip().lower() for h in next(reader)]
+        header = [h.strip().lstrip("\ufeff").lower() for h in next(reader)]
     except StopIteration:
         raise InputError("the loan file is empty") from None
     if len(set(header)) != len(header):
@@ -147,12 +152,15 @@ def _read(fh: io.TextIOBase, max_rows: int) -> Loans:
     cols: dict[str, list[str]] = {h: [] for h in header}
     width = len(header)
     n = 0
-    for line, rec in enumerate(reader, start=2):
+    lines: list[int] = []
+    for rec in reader:
         if not rec or all(not c.strip() for c in rec):
             continue
+        line = reader.line_num
         if len(rec) != width:
             raise InputError(f"row {line}: {len(rec)} cells, the header has {width}")
         n += 1
+        lines.append(line)
         if n > max_rows:
             raise InputError(f"the loan file has more than {max_rows} rows")
         for h, cell in zip(header, rec, strict=True):
@@ -161,7 +169,7 @@ def _read(fh: io.TextIOBase, max_rows: int) -> Loans:
         raise InputError("the loan file has no rows")
 
     def fail(column: str, i: int, why: str) -> InputError:
-        return InputError(f"row {i + 2}, column {column}: {why}")
+        return InputError(f"row {lines[i]}, column {column}: {why}")
 
     text: dict[str, NDArray[np.str_]] = {}
     for c, default in TEXT.items():
@@ -196,10 +204,11 @@ def _read(fh: io.TextIOBase, max_rows: int) -> Loans:
             if cell == "":
                 arr[i] = missing_value
                 continue
-            try:
-                arr[i] = float(cell)
-            except ValueError:
-                raise fail(c, i, f"{cell!r} is not a number") from None
+            if not _NUMBER.fullmatch(cell):
+                raise fail(c, i, f"{cell!r} is not a number")
+            arr[i] = float(cell)
+            if not np.isfinite(arr[i]):
+                raise fail(c, i, f"{cell!r} is too large")
         given = ~np.isnan(arr)
         bad = np.nonzero(given & ~((arr >= lo) & (arr <= hi)))[0]
         if bad.size:
@@ -215,7 +224,7 @@ def _read(fh: io.TextIOBase, max_rows: int) -> Loans:
             raise fail(c, int(empty[0]), "empty")
     need_pd = np.nonzero(np.isnan(num["pd_12m"]) & (text["grade"] == ""))[0]
     if need_pd.size:
-        raise InputError(f"row {int(need_pd[0]) + 2}: neither pd_12m nor grade is given")
+        raise InputError(f"row {lines[int(need_pd[0])]}: neither pd_12m nor grade is given")
 
     flag: dict[str, NDArray[np.bool_]] = {}
     for c in FLAGS:

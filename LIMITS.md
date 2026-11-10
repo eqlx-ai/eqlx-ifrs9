@@ -30,6 +30,11 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
   neither.
 - **Discounting** is at the effective interest rate you supply, compounded as
   `(1 + rate) ** (months / 12)`, to the reporting date.
+- **Contract rate.** `rate` drives the repayment schedule and is read as a nominal annual rate
+  (divided by 12) unless `rate_convention` says otherwise. Without a `rate` column the schedule is
+  built from `eir` as an effective rate, so that schedule and discounting agree.
+- **`ead_basis: "mid"`** averages the balance before and after the month's payment. For a bullet
+  loan that halves the exposure of the final month.
 - **LGD** is taken as given, measured at the default date, constant over the life of the loan in the
   portfolio run. Use the `lgd` module for collateral-based term structures in your own code. Do not
   feed regulatory downturn LGDs: IFRS 9 asks for a best estimate.
@@ -50,8 +55,11 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
   PD. A base scenario of zeros lowers PDs.
 - You must say whether `pd_12m` is the long-run average (`pd_basis: "long_run"`) or the PD in
   today's economy (`"current"`, with `current_z`). The tool refuses to guess.
-- After the forecast horizon the PD reverts to the long-run PD, immediately or over
-  `reversion_years`. The last z is held while the weight of the shifted PD falls.
+- After the forecast horizon the PD reverts to the long-run PD: immediately with
+  `reversion_years: 0`, or through that many transitional years (with 1, the first year after the
+  horizon is half-way). The last z is held while the weight of the shifted PD falls.
+- A segment that appears in the loan file needs an entry under `segments` (or a `*` entry) as soon
+  as a scenario has a z path; the run stops otherwise instead of assuming a correlation of zero.
 - The shift is applied to the annualised PD of each 12-month block and the hazard inside the block
   is scaled. Asset correlation is one number per segment.
 - Transition matrices are shifted year by year and turned into monthly matrices through a fitted
@@ -67,8 +75,12 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
   they are not rules of the standard.
 - The low credit risk exemption switches off the PD and grade tests only. Days past due and the
   forborne, watch-list and collective flags still move a loan to stage 2.
+- Without an origination PD (or origination grade, for a notch rule) there is nothing to compare
+  with: the loan goes to stage 2 unless it is low credit risk (IFRS 9 7.2.20), or the run stops,
+  or the tests are skipped, depending on `missing_origination_pd`.
 - Probation and cure periods need `previous_stage` and `periods_without_trigger` from your own
-  history; the tool does not keep state between runs.
+  history; the tool does not keep state between runs, and it warns when the history is missing.
+  A loan leaving stage 3 passes through stage 2 for the probation period.
 - "Primary reason" depends on the order of precedence, which is a setting.
 
 ## Turkey profile
@@ -81,11 +93,14 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
 - "One year" is 365 days unless you set `days_in_year`.
 - The small-amount exemption of Article 5(7) is not applied: its thresholds are indexed every year.
 - Contagion for a borrower who has both consumer and other loans follows one reading of Article
-  5(5); see the docstring of `tr_bddk.classify`.
+  5(5): a non-performing consumer loan moves the borrower's other loans to at least group 2, not
+  into default. See the docstring of `tr_bddk.classify`.
+- A loan held in stage 3 by a cure period counts as non-performing for contagion.
 - The three-month exit from restructured status (Article 7(8)) is applied only to loans restructured
   while performing, which is a literal reading of the text.
 - The 2020-2021 relief (90 and 180 days) is available through `as_of`; the grandfathering of loans
-  already past due on 1 October 2021 is not modelled.
+  already past due on 1 October 2021 is not modelled, and neither is the suspension of Article
+  4(1)(c)5 (re-default of restructured loans) that applied until 30 June 2021.
 - Fixed provision rates and collateral consideration rates concern banks that do not apply TFRS 9.
   The exclusions of Article 10(4) are not modelled. Leasing, factoring and financing companies have
   their own regulation, which is not encoded.

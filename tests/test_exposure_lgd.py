@@ -27,6 +27,17 @@ def test_zero_rate_annuity_and_effective_rate():
         schedule.period_rate(0.12, 12, "simple")  # type: ignore[arg-type]
 
 
+def test_annuity_with_a_tiny_rate_is_stable():
+    flat = schedule.annuity(1200, 0.0, 12).balance_start
+    for tiny in (1e-17, 1e-15, 1e-12, -1e-12):
+        s = schedule.annuity(1200, tiny, 12)
+        assert s.balance_start == pytest.approx(flat, rel=1e-9) and s.payment == pytest.approx(
+            np.full(12, 100.0), rel=1e-9
+        )
+    negative = schedule.annuity(1000, -0.02, 24)
+    assert negative.balance_end[-1] == pytest.approx(0.0, abs=1e-9) and negative.principal.sum() == pytest.approx(1000)
+
+
 def test_equal_principal_by_hand():
     s = schedule.equal_principal(1000, 0.03, 4, periods_per_year=1)
     assert s.balance_start == pytest.approx([1000, 750, 500, 250])

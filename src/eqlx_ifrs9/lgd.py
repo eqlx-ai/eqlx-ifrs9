@@ -33,7 +33,9 @@ def collateral_lgd(
 
     ``net proceeds = collateral * (1 - haircut) * (1 - cost_rate)``, received ``years_to_recovery``
     after default and discounted at ``discount_rate`` (the effective interest rate under IFRS 9).
-    The recovery from collateral cannot exceed the claim. On the part not covered by collateral
+    The recovery from collateral cannot exceed the claim at the default date (the cap is applied
+    before discounting, so interest accruing on the claim during the workout is not recovered and a
+    fully covered loan still loses the time value). On the part not covered by collateral
     ``unsecured_recovery_rate`` is recovered at the same time. With probability ``cure_probability``
     the loan cures and loses ``lgd_if_cured`` instead. Costs of obtaining and selling the collateral
     are deducted whether or not foreclosure is likely (IFRS 9 B5.5.55).
