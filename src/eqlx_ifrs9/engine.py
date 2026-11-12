@@ -10,8 +10,8 @@ The steps, in order:
 4. Stage from the staging policy, comparing today's PD with the PD expected at origination for the
    same remaining window. By default the scenario-weighted PD is used, so that staging and
    measurement see the same economy.
-5. Reported ECL: 12-month ECL in stage 1, lifetime ECL in stage 2, exposure times the loss rate in
-   default in stage 3.
+5. Reported ECL: 12-month ECL in stage 1, lifetime ECL in stage 2, and in stage 3 exposure times the
+   loss rate in default, or the individually assessed allowance where the file gives one.
 
 Arithmetic is done on arrays, in chunks. :func:`loan_detail` recomputes one loan with the scalar
 building blocks of the library; the test-suite checks that both routes agree.
@@ -384,7 +384,8 @@ def run(loans: Loans, config: Config) -> PortfolioResult:
     ecl12_w = weights @ ecl12
     life_w = weights @ life
     exposure = loans.num["balance"] + ccf * undrawn
-    ecl_default = exposure * prep.lgd_default
+    individual = loans.num["individual_ecl"]
+    ecl_default = np.where(np.isnan(individual), exposure * prep.lgd_default, individual)
 
     orig_life, orig_12 = _origination_pds(loans, prep, config)
     policy, limits = _effective_policy(config, warnings)
@@ -457,6 +458,11 @@ def run(loans: Loans, config: Config) -> PortfolioResult:
         warnings.append(f"{int(np.isnan(orig_life).sum())} loans have no origination PD or grade")
 
     stage = res.stage
+    unused = ~np.isnan(individual) & (stage != 3)
+    if np.any(unused):
+        warnings.append(
+            f"{int(unused.sum())} loans have an individual_ecl but are not in stage 3: it is not used for them"
+        )
     ecl = np.where(stage == 1, ecl12_w, np.where(stage == 2, life_w, ecl_default))
     return PortfolioResult(
         loans=loans,
@@ -648,7 +654,9 @@ def loan_detail(result: PortfolioResult, loan_id: str, periods: bool = False) ->
     ecl_12m = float(sum(wk * s["twelve_month_ecl"] for wk, s in zip(w, per_scenario, strict=True)))
     ecl_life = float(sum(wk * s["lifetime_ecl"] for wk, s in zip(w, per_scenario, strict=True)))
     exposure = float(one.num["balance"][0]) + ccf * undrawn
-    ecl_default = exposure * float(prep.lgd_default[0])
+    individual = float(one.num["individual_ecl"][0])
+    assessed = not np.isnan(individual)
+    ecl_default = individual if assessed else exposure * float(prep.lgd_default[0])
     measured = {1: ecl_12m, 2: ecl_life, 3: ecl_default}[stage]
 
     def num(v: float) -> float | None:
@@ -680,7 +688,11 @@ def loan_detail(result: PortfolioResult, loan_id: str, periods: bool = False) ->
         "weighted": {"twelve_month_ecl": ecl_12m, "lifetime_ecl": ecl_life},
         "credit_impaired_ecl": ecl_default,
         "ecl": measured,
-        "measurement": {1: "12-month ECL", 2: "lifetime ECL", 3: "exposure x loss rate in default"}[stage],
+        "measurement": {
+            1: "12-month ECL",
+            2: "lifetime ECL",
+            3: "individually assessed allowance" if assessed else "exposure x loss rate in default",
+        }[stage],
         "coverage": measured / exposure if exposure > 0 else 0.0,
     }
     if result.group is not None and result.profile_reasons is not None:

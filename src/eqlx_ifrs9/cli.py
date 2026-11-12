@@ -1,4 +1,9 @@
-"""Command line: ``ifrs9 run | loan | list | compare | describe | ecl | individual | sample | mcp``."""
+"""Command line.
+
+``ifrs9 run | loan | list | compare | describe | ecl`` for one loan file, ``reconcile | response`` to
+review it, ``movement | staging-quality | backtest | challenger`` for two reporting dates,
+``individual`` for one debtor, ``sample`` and ``mcp``.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__, calc, config, data, engine, individual, report, synthetic
+from . import __version__, calc, config, data, engine, individual, period, report, review, synthetic
 from .errors import InputError
 from .staging import Reason, names
 
@@ -28,15 +33,18 @@ def parse_overrides(items: list[str] | None) -> dict[str, Any]:
     return out
 
 
-def load_run(loans_path: str, config_path: str | None, overrides: dict[str, Any]) -> engine.PortfolioResult:
+def load_settings(config_path: str | None, overrides: dict[str, Any]) -> dict[str, Any]:
     raw: dict[str, Any] = {}
     if config_path:
         try:
             raw = json.loads(Path(config_path).read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise InputError(f"{config_path}: not valid JSON ({exc})") from exc
-    cfg = config.from_dict(config.with_overrides(raw, overrides) if overrides else raw)
-    return engine.run(data.read_csv(loans_path), cfg)
+    return config.with_overrides(raw, overrides) if overrides else raw
+
+
+def load_run(loans_path: str, config_path: str | None, overrides: dict[str, Any]) -> engine.PortfolioResult:
+    return engine.run(data.read_csv(loans_path), config.from_dict(load_settings(config_path, overrides)))
 
 
 def read_case(path: str | Path) -> dict[str, Any]:
@@ -116,6 +124,36 @@ def build_parser() -> argparse.ArgumentParser:
     s = portfolio("compare", "effect of changing settings: --set gives the changed run")
     s.add_argument("--limit", type=int, default=20)
 
+    s = portfolio("reconcile", "reported stage and allowance against the recalculation")
+    s.add_argument("--limit", type=int, default=20)
+
+    s = portfolio("response", "allowance as the base scenario is moved up and down")
+    s.add_argument("--shifts", default=",".join(f"{x:g}" for x in review.SHIFTS), help="comma-separated shifts of z")
+    s.add_argument("--scenario", help="scenario to shift (default: the base scenario)")
+
+    def two_dates(name: str, help_text: str) -> argparse.ArgumentParser:
+        s = sub.add_parser(name, help=help_text)
+        s.add_argument("opening", help="loan file of the earlier date (CSV)")
+        s.add_argument("closing", help="loan file of the later date (CSV)")
+        s.add_argument("--config", help="settings of the later date (JSON)")
+        s.add_argument("--opening-config", help="settings of the earlier date (default: the same as --config)")
+        s.add_argument("--write-offs", help="CSV with the loan_id of loans written off in between")
+        return s
+
+    s = two_dates("movement", "opening to closing allowance by stage, split into drivers")
+    s.add_argument("--order", default=",".join(period.DRIVERS), help="order in which the drivers are replaced")
+    s.add_argument("--json", action="store_true", help="print everything as JSON")
+    s.add_argument("--limit", type=int, default=20)
+
+    two_dates("staging-quality", "how the stages of the earlier date turned out")
+
+    s = two_dates("backtest", "expected against actual defaults; forecast error and model error")
+    s.add_argument("--months", type=int, default=12, help="months between the two dates")
+    s.add_argument("--realised-z", type=float, help="state of the economy that occurred (z > 0 good)")
+
+    s = two_dates("challenger", "allowance with the rating migration observed between the two files")
+    s.add_argument("--months", type=int, default=12, help="months between the two dates")
+
     s = sub.add_parser("describe", help="what a loan file contains, before any calculation")
     s.add_argument("loans")
 
@@ -186,7 +224,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         out = Path(args.directory)
         out.mkdir(parents=True, exist_ok=True)
         cases = synthetic.individual_cases()
-        existing = [f for f in ("loans.csv", "settings.json", "planted_cases.json", *cases) if (out / f).exists()]
+        period_files = ("loans_previous.csv", "settings_previous.json", "write_offs.csv")
+        names_ = ("loans.csv", "settings.json", "planted_cases.json", *period_files, *cases)
+        existing = [f for f in names_ if (out / f).exists()]
         if existing and not args.force:
             raise InputError(f"{', '.join(existing)} already exist in {out}; use --force to overwrite")
         sample = synthetic.generate(args.loans, args.seed, None if args.no_profile else "tr_bddk")
@@ -195,12 +235,42 @@ def _dispatch(args: argparse.Namespace) -> int:
         (out / "planted_cases.json").write_text(
             json.dumps([p.__dict__ for p in sample.planted], indent=2) + "\n", encoding="utf-8"
         )
+        (out / "loans_previous.csv").write_text(sample.previous_csv, encoding="utf-8")
+        (out / "settings_previous.json").write_text(
+            json.dumps(sample.previous_settings, indent=2) + "\n", encoding="utf-8"
+        )
+        (out / "write_offs.csv").write_text(sample.write_offs_csv, encoding="utf-8")
         for name, case in cases.items():
             (out / name).write_text(json.dumps(case, indent=2) + "\n", encoding="utf-8")
-        print(f"wrote loans.csv, settings.json, planted_cases.json and {len(cases)} case files to {out}")
+        print(f"wrote {', '.join(names_)} to {out}")
+        return 0
+
+    if cmd in ("movement", "staging-quality", "backtest", "challenger"):
+        closing = load_run(args.closing, args.config, {})
+        opening = load_run(args.opening, args.opening_config or args.config, {})
+        gone = period.read_write_offs(args.write_offs) if args.write_offs else []
+        if cmd == "movement":
+            table = period.movement(
+                opening, closing, write_offs=gone, order=[x.strip() for x in args.order.split(",")], limit=args.limit
+            )
+            print(json.dumps(table, indent=2, ensure_ascii=False) if args.json else period.text_movement(table))
+        elif cmd == "staging-quality":
+            _emit(period.staging_quality(opening, closing, write_offs=gone))
+        elif cmd == "backtest":
+            _emit(period.backtest(opening, closing, write_offs=gone, months=args.months, realised_z=args.realised_z))
+        else:
+            _emit(review.challenger(opening, closing, write_offs=gone, months=args.months))
         return 0
 
     overrides = parse_overrides(args.set)
+    if cmd == "response":
+        try:
+            shifts = [float(x) for x in args.shifts.split(",") if x.strip()]
+        except ValueError as exc:
+            raise InputError(f"--shifts: {exc}") from exc
+        raw = load_settings(args.config, overrides)
+        _emit(review.response(data.read_csv(args.loans), config.from_dict(raw), shifts=shifts, scenario=args.scenario))
+        return 0
     if cmd == "compare":
         if not overrides:
             raise InputError("compare needs at least one --set KEY=VALUE for the changed run")
@@ -209,6 +279,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         _emit({"changed_settings": overrides, **report.compare(before, after, args.limit)})
         return 0
     result = load_run(args.loans, args.config, overrides)
+    if cmd == "reconcile":
+        _emit(review.reconcile(result, limit=args.limit))
+        return 0
     if cmd == "run":
         table = report.summary(result)
         print(json.dumps(table, indent=2, ensure_ascii=False) if args.json else report.text_summary(table))

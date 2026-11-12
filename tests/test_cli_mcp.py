@@ -28,8 +28,11 @@ def test_sample_writes_three_files(folder):
         "case_going_concern.json",
         "case_gone_concern.json",
         "loans.csv",
+        "loans_previous.csv",
         "planted_cases.json",
         "settings.json",
+        "settings_previous.json",
+        "write_offs.csv",
     ]
     assert (folder / "loans.csv").read_text() == synthetic.generate(150, 7).csv
     assert len(json.loads((folder / "planted_cases.json").read_text())) == 11
@@ -200,6 +203,12 @@ TOOLS = {
     "turkey_reclassification_check",
     "assess_individual",
     "collateral_recovery",
+    "reconcile_reported",
+    "scenario_response",
+    "allowance_movement",
+    "staging_quality",
+    "backtest_defaults",
+    "challenger_matrix",
 }
 
 
@@ -221,8 +230,11 @@ def test_mcp_flow(root):
         "case_going_concern.json",
         "case_gone_concern.json",
         "loans.csv",
+        "loans_previous.csv",
         "planted_cases.json",
         "settings.json",
+        "settings_previous.json",
+        "write_offs.csv",
     ]
     assert call(server, "describe_loans", {"loans": "loans.csv"}).structured_content["loans"] == 161
     args = {"loans": "loans.csv", "settings": "settings.json"}
@@ -245,9 +257,12 @@ def test_mcp_flow(root):
         "case_gone_concern.json",
         "link_out.csv",
         "loans.csv",
+        "loans_previous.csv",
         "notes.txt",
         "planted_cases.json",
         "settings.json",
+        "settings_previous.json",
+        "write_offs.csv",
     ]
 
 
@@ -281,6 +296,52 @@ def test_mcp_calculators(root):
         },
     ).structured_content
     assert tr["eligible"] is False and "7(8)" in tr["unmet"][0]
+
+
+def test_mcp_review_and_two_dates(root):
+    from eqlx_ifrs9 import config, data, engine, period, review
+
+    server = build_server(root)
+    closing = engine.run(data.read_csv(root / "loans.csv"), config.load(root / "settings.json"))
+    opening = engine.run(data.read_csv(root / "loans_previous.csv"), config.load(root / "settings_previous.json"))
+    gone = period.read_write_offs(root / "write_offs.csv")
+    plain = lambda x: json.loads(json.dumps(x))  # noqa: E731
+    one = {"loans": "loans.csv", "settings": "settings.json"}
+    two = {
+        "opening_loans": "loans_previous.csv",
+        "closing_loans": "loans.csv",
+        "closing_settings": "settings.json",
+        "opening_settings": "settings_previous.json",
+        "write_offs": "write_offs.csv",
+    }
+    assert call(server, "reconcile_reported", one).structured_content == plain(review.reconcile(closing))
+    got = call(server, "scenario_response", {**one, "shifts": [-1.0, 1.0]}).structured_content
+    assert got == plain(review.response(closing.loans, closing.config, shifts=[-1.0, 1.0]))
+    assert call(server, "allowance_movement", two).structured_content == plain(
+        period.movement(opening, closing, write_offs=gone)
+    )
+    reordered = call(server, "allowance_movement", {**two, "order": ["lgd", "pd", "exposure", "settings", "other"]})
+    assert reordered.structured_content["order"][0] == "lgd"
+    assert call(server, "staging_quality", two).structured_content == plain(
+        period.staging_quality(opening, closing, write_offs=gone)
+    )
+    assert call(server, "backtest_defaults", {**two, "realised_z": -0.4}).structured_content == plain(
+        period.backtest(opening, closing, write_offs=gone, realised_z=-0.4)
+    )
+    assert call(server, "challenger_matrix", two).structured_content == plain(
+        review.challenger(opening, closing, write_offs=gone)
+    )
+    for bad in ("../outside.csv", "link_out.csv", "settings.json", "missing.csv"):
+        assert call(server, "allowance_movement", {**two, "write_offs": bad}).is_error
+        assert call(server, "staging_quality", {**two, "opening_loans": bad}).is_error
+    assert call(server, "allowance_movement", {**two, "order": ["pd"]}).is_error
+    assert call(server, "reconcile_reported", {"loans": "loans_previous.csv", "settings": "settings.json"}).is_error
+    assert sorted(p.name for p in root.iterdir() if p.suffix == ".csv") == [
+        "link_out.csv",
+        "loans.csv",
+        "loans_previous.csv",
+        "write_offs.csv",
+    ]
 
 
 def test_mcp_individual_assessment(root):
