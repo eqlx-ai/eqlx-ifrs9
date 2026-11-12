@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Individual assessment of credit-impaired debtors (`individual`, `ifrs9 individual`, MCP tools
+  `assess_individual` and `collateral_recovery`): gone concern, steady-state and two-step going concern,
+  market price; sharing of cash by seniority; probability-weighted scenarios; undrawn commitments;
+  warnings against published ECB expectations. Checked against the worked examples of the ECB asset
+  quality review manual and the guidance on non-performing loans.
+- `ifrs9 sample` also writes two made-up case files.
+
 ## 0.1.0
 
 First release.

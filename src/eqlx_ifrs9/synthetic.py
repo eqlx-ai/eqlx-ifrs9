@@ -322,3 +322,120 @@ def generate(n_loans: int = 2000, seed: int = 7, profile: str | None = "tr_bddk"
     for r in rows:
         buf.write(",".join(str(r[c]) for c in COLUMNS) + "\n")
     return Sample(buf.getvalue(), settings(profile), planted)
+
+
+def individual_cases() -> dict[str, dict[str, Any]]:
+    """Two made-up debtors for the individual assessment: one that may survive, one that will not.
+
+    Keyed by file name. Every figure is invented; the amounts are in one currency.
+    """
+    going = {
+        "debtor": {
+            "id": "DEMO-MACHINERY",
+            "sector": "other",
+            "months_past_due": 7,
+            "ebitda_history": [18_200_000, 21_500_000],
+        },
+        "exposures": [
+            {"id": "TERM-LOAN", "gross_carrying_amount": 42_000_000, "eir": 0.38, "rank": 2},
+            {
+                "id": "REVOLVING",
+                "gross_carrying_amount": 8_000_000,
+                "eir": 0.42,
+                "rank": 2,
+                "expected_draws": [{"year": 1, "amount": 2_000_000}],
+            },
+        ],
+        "other_claims": [
+            {"name": "taxes and employees", "rank": 1, "amount": 6_500_000},
+            {"name": "other banks", "rank": 2, "amount": 55_000_000},
+            {"name": "trade creditors", "rank": 3, "amount": 31_000_000},
+        ],
+        "collateral": [
+            {
+                "id": "FACTORY",
+                "type": "industrial property",
+                "value": 60_000_000,
+                "valuation_age_months": 14,
+                "secures": "TERM-LOAN",
+                "central_to_cash_flows": True,
+                "sale": {
+                    "years": 2.5,
+                    "haircut": 0.20,
+                    "selling_cost_rate": 0.04,
+                    "annual_cost_rate": 0.01,
+                    "auction": True,
+                },
+            },
+            {
+                "id": "PLEDGED-DEPOSIT",
+                "type": "cash",
+                "value": 3_000_000,
+                "secures": "REVOLVING",
+                "central_to_cash_flows": False,
+                "sale": {"years": 0, "haircut": 0.0},
+            },
+        ],
+        "scenarios": [
+            {
+                "name": "restructuring holds",
+                "probability": 0.55,
+                "approach": "steady_state",
+                "cash_flow": {
+                    "revenue": 310_000_000,
+                    "cost_of_sales": 262_000_000,
+                    "distribution_costs": 14_000_000,
+                    "administrative_expenses": 11_000_000,
+                    "other_gains_losses": -1_500_000,
+                    "tax_rate": 0.25,
+                    "net_interest_expense": 21_000_000,
+                    "depreciation": 6_000_000,
+                    "owner_payout": 1_200_000,
+                    "capex": 5_000_000,
+                    "sustainability_deductions": 800_000,
+                },
+                "multiple": 6,
+                "non_pledged_cash": 2_000_000,
+            },
+            {
+                "name": "liquidation",
+                "probability": 0.45,
+                "approach": "gone_concern",
+                "collateral": {"FACTORY": {"years": 3, "haircut": 0.25}},
+                "unsecured_recovery": {"amount": 9_000_000, "year": 3},
+            },
+        ],
+    }
+    gone = {
+        "debtor": {"id": "DEMO-DEVELOPER", "sector": "other", "months_past_due": 20},
+        "exposures": [{"id": "PROJECT-LOAN", "gross_carrying_amount": 95_000_000, "eir": 0.35}],
+        "collateral": [
+            {
+                "id": "LAND",
+                "type": "land with unfinished building",
+                "value": 120_000_000,
+                "valuation_age_months": 9,
+                "secures": "PROJECT-LOAN",
+                "central_to_cash_flows": True,
+                "prior_claims": 10_000_000,
+                "sale": {
+                    "years": 3,
+                    "haircut": 0.15,
+                    "selling_cost_rate": 0.05,
+                    "annual_cost_rate": 0.01,
+                    "costs": [{"year": 1, "amount": 1_500_000}],
+                    "auction": True,
+                },
+            }
+        ],
+        "scenarios": [
+            {"name": "sale as planned", "probability": 0.6, "approach": "gone_concern"},
+            {
+                "name": "slow market",
+                "probability": 0.4,
+                "approach": "gone_concern",
+                "collateral": {"LAND": {"years": 4, "haircut": 0.30, "value_change": -0.10}},
+            },
+        ],
+    }
+    return {"case_going_concern.json": going, "case_gone_concern.json": gone}

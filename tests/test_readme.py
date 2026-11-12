@@ -39,6 +39,25 @@ def test_command_line_output_shown_in_the_readme():
     assert '"ecl": 2750000.0' in README
 
 
+def test_individual_assessment_shown_in_the_readme():
+    from eqlx_ifrs9 import individual
+
+    r = individual.assess(synthetic.individual_cases()["case_gone_concern.json"])
+    e = r["exposures"][0]
+    shown = [r["total"]["ecl"], e["gross_carrying_amount"]]
+    for sc in e["scenarios"]:
+        shown += [sc["recoverable"], sc["shortfall"]]
+    sale = r["scenarios"][0]["collateral_sold"][0]["by_exposure"]["PROJECT-LOAN"]["flows"]
+    shown += [f["present_value"] for f in sale if f["item"] == "sale at market value"]
+    for value in shown:
+        assert f"{value:,.0f}" in README
+    assert f"{r['total']['coverage']:.1%} of the loan" in README
+    pv = individual.collateral_recovery(
+        200, 0.05, years_to_sale=5, haircut=0.10, selling_cost_rate=0.10, annual_cost_rate=0.05
+    )["present_value"]
+    assert f"# {pv:.2f}" in README
+
+
 def test_every_mcp_tool_is_listed():
     pytest.importorskip("mcp")
     import asyncio
