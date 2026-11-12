@@ -1,7 +1,7 @@
 [project]
 name = "eqlx-ifrs9"
-version = "0.1.0"
-description = "Deterministic IFRS 9 expected credit loss: PD term structures, staging, 12-month and lifetime ECL, scenario weighting, provision matrix. Checked against published examples. Read-only MCP server for AI agents."
+version = "0.2.0"
+description = "Deterministic IFRS 9 expected credit loss: staging, 12-month and lifetime ECL, scenarios, review of reported figures, allowance movement between two dates, individual assessment. Checked against published examples. Read-only MCP server for AI agents."
 readme = "README.md"
 authors = [
     { name = "Can Demir", email = "can.demir@eqlx.ai" }

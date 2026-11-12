@@ -10,15 +10,18 @@ Start it with ``ifrs9 mcp --root /path/to/folder`` (needs ``pip install 'eqlx-if
 
 from __future__ import annotations
 
+import functools
 import json
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, ParamSpec, TypeVar
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from . import __version__, calc, config, data, engine, individual, report
+from . import __version__, calc, config, data, engine, individual, period, report, review
 from .errors import InputError
 from .profiles import tr_bddk
 
@@ -29,6 +32,27 @@ MAX_SETTINGS_BYTES = 5_000_000
 
 class OutsideRootError(ValueError):
     pass
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _told(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Refused input comes back to the agent with its reason instead of a bare failure."""
+
+    @functools.wraps(fn)
+    def inner(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        try:
+            return fn(*args, **kwargs)
+        except FileNotFoundError as exc:
+            raise ToolError(f"file not found: {exc}") from exc
+        except UnicodeDecodeError as exc:
+            raise ToolError("the file is not UTF-8 text") from exc
+        except (InputError, OutsideRootError, IsADirectoryError, NotADirectoryError, RecursionError) as exc:
+            raise ToolError(str(exc) or type(exc).__name__) from exc
+
+    return inner
 
 
 def _resolve(root: Path, path: str) -> Path:
@@ -108,6 +132,11 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
             "file (JSON) with the staging thresholds and scenarios. Start with `list_files` and "
             "`describe_loans`, then `run_portfolio`; use `list_loans` and `explain_loan` to look at individual "
             "loans and `compare_settings` to see what a different threshold or weight would change. "
+            "To review a lender's own figures (columns reported_stage and reported_ecl) use `reconcile_reported`; "
+            "`scenario_response` shows how the allowance reacts to the economy. With the loan file of an earlier "
+            "date as well, `allowance_movement` explains why the allowance changed, `staging_quality` shows how "
+            "the earlier stages turned out, `backtest_defaults` compares expected with actual defaults and "
+            "`challenger_matrix` recomputes the allowance with the rating migration observed between the files. "
             "`calculate_ecl`, `pd_term_structure` and `provision_matrix` are calculators that need no file. "
             "For one credit-impaired debtor assessed individually, `assess_individual` reads a case file (JSON: "
             "debtor, exposures, other claims, collateral, scenarios with probabilities) and returns the "
@@ -119,6 +148,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
     )
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def list_files(path: str = ".") -> list[dict[str, Any]]:
         """List the loan files (.csv) and settings files (.json) under a path in the allowed folder."""
         p = _resolve(root, path)
@@ -133,12 +163,14 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return out
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def describe_loans(loans: str) -> dict[str, Any]:
         """What a loan file contains before any calculation: number of loans and borrowers, columns,
         totals, segments, days-past-due buckets, and gaps such as loans without origination risk."""
         return report.describe(runs.get_loans(loans)[1])
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def run_portfolio(
         loans: str, settings: str | None = None, overrides: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -153,6 +185,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return report.summary(runs.run(loans, settings, overrides))
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def list_loans(
         loans: str,
         settings: str | None = None,
@@ -181,6 +214,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         )
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def explain_loan(
         loans: str,
         loan_id: str,
@@ -194,6 +228,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return engine.loan_detail(runs.run(loans, settings, overrides), loan_id, periods=periods)
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def compare_settings(
         loans: str, changes: dict[str, Any], settings: str | None = None, limit: int = 20
     ) -> dict[str, Any]:
@@ -207,6 +242,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return {"changed_settings": changes, **report.compare(before, after, limit)}
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def calculate_ecl(
         balance: float,
         lgd: float,
@@ -255,6 +291,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         )
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def pd_term_structure(
         matrix: list[list[float]],
         years: int,
@@ -272,6 +309,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         )
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def provision_matrix(
         gross_carrying_amount: list[float], loss_rate: list[float], buckets: list[str] | None = None
     ) -> dict[str, Any]:
@@ -280,6 +318,122 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return calc.provision_matrix(gross_carrying_amount, loss_rate, buckets)
 
     @server.tool(annotations=READ_ONLY)
+    @_told
+    def reconcile_reported(
+        loans: str, settings: str | None = None, overrides: dict[str, Any] | None = None, limit: int = 20
+    ) -> dict[str, Any]:
+        """The lender's own figures against the recalculation. Needs the columns `reported_stage` and/or
+        `reported_ecl` in the loan file. Returns the stage table (rows reported, columns recalculated), the
+        loans reported in a lower stage with the rule that puts them higher, the allowance gap in total, by
+        segment and by stage with a verdict (recalculation above the reported figure by less than 5%:
+        immaterial; 5% to 10%: explain; more: investigate), and the gap split into the part caused by staging
+        and the part caused by measurement. `difference` is recalculated minus reported."""
+        return review.reconcile(runs.run(loans, settings, overrides), limit=limit)
+
+    @server.tool(annotations=READ_ONLY)
+    @_told
+    def scenario_response(
+        loans: str,
+        settings: str | None = None,
+        overrides: dict[str, Any] | None = None,
+        shifts: list[float] | None = None,
+        scenario: str | None = None,
+    ) -> dict[str, Any]:
+        """How the allowance reacts to the economy. The base scenario's path (z, standard deviations of the
+        economy, negative is worse) is moved by each shift and the portfolio is computed with that single
+        scenario: once with the stages held, once with the loans staged again. Also returns the share of
+        stage 2 per shift and how much more a step down costs than a step up saves."""
+        lo = runs.get_loans(loans)[1]
+        cfg = config.from_dict(runs.settings(settings, overrides))
+        return review.response(lo, cfg, shifts=shifts if shifts is not None else review.SHIFTS, scenario=scenario)
+
+    def two_dates(
+        opening_loans: str,
+        closing_loans: str,
+        closing_settings: str | None,
+        opening_settings: str | None,
+        write_offs: str | None,
+    ) -> tuple[engine.PortfolioResult, engine.PortfolioResult, list[str]]:
+        closing = runs.run(closing_loans, closing_settings, None)
+        opening = runs.run(opening_loans, opening_settings or closing_settings, None)
+        gone = period.read_write_offs(runs.file(write_offs, ".csv")) if write_offs else []
+        return opening, closing, gone
+
+    @server.tool(annotations=READ_ONLY)
+    @_told
+    def allowance_movement(
+        opening_loans: str,
+        closing_loans: str,
+        closing_settings: str | None = None,
+        opening_settings: str | None = None,
+        write_offs: str | None = None,
+        order: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Why the allowance changed between two reporting dates. Loans are matched by loan_id. Returns the
+        reconciliation of the loss allowance and of the gross carrying amount by stage (the layout of the
+        IFRS 7 35H table): transfers between stages, remeasurement on transfer, new loans, derecognised loans,
+        write-offs, and the change of continuing loans split into drivers (settings and scenarios, exposure
+        and time, PD, LGD, other) by replacing one group of inputs at a time in `order`. The rows add up to
+        the closing balance. `largest_changes` lists the loans behind the change with their drivers.
+        `write_offs` is a CSV with a loan_id column; `opening_settings` defaults to `closing_settings`."""
+        opening, closing, gone = two_dates(opening_loans, closing_loans, closing_settings, opening_settings, write_offs)
+        return period.movement(opening, closing, write_offs=gone, order=order or period.DRIVERS, limit=limit)
+
+    @server.tool(annotations=READ_ONLY)
+    @_told
+    def staging_quality(
+        opening_loans: str,
+        closing_loans: str,
+        closing_settings: str | None = None,
+        opening_settings: str | None = None,
+        write_offs: str | None = None,
+    ) -> dict[str, Any]:
+        """How the stages of the earlier date turned out: the stage transition table, where stage 3 came from
+        (share that skipped stage 2), default rate of stage 1 against stage 2, the inflow into stage 2 by
+        reason and what became of the loans that were in stage 2. Warns when stage 2 was not riskier than
+        stage 1."""
+        opening, closing, gone = two_dates(opening_loans, closing_loans, closing_settings, opening_settings, write_offs)
+        return period.staging_quality(opening, closing, write_offs=gone)
+
+    @server.tool(annotations=READ_ONLY)
+    @_told
+    def backtest_defaults(
+        opening_loans: str,
+        closing_loans: str,
+        closing_settings: str | None = None,
+        opening_settings: str | None = None,
+        write_offs: str | None = None,
+        months: int = 12,
+        realised_z: float | None = None,
+    ) -> dict[str, Any]:
+        """Defaults expected at the earlier date against defaults that happened (stage 3 at the later date, or
+        written off), in total, by stage and by segment. With `realised_z`, the state of the economy that
+        actually occurred (z > 0 good), the difference is split into `forecast_error` (what the scenarios got
+        wrong about the economy) and `model_error` (what remains once the economy is known)."""
+        opening, closing, gone = two_dates(opening_loans, closing_loans, closing_settings, opening_settings, write_offs)
+        return period.backtest(opening, closing, write_offs=gone, months=months, realised_z=realised_z)
+
+    @server.tool(annotations=READ_ONLY)
+    @_told
+    def challenger_matrix(
+        opening_loans: str,
+        closing_loans: str,
+        closing_settings: str | None = None,
+        opening_settings: str | None = None,
+        write_offs: str | None = None,
+        months: int = 12,
+    ) -> dict[str, Any]:
+        """Challenger for graded segments: counts the moves between rating grades from the earlier to the
+        later file, computes the later portfolio again with the observed matrix instead of the settings'
+        matrix, and compares the allowance with the reported one (or with the run on the settings' matrix),
+        with the 5% / 10% verdict. Returns the counts and the observed one-year PD per grade; one period is a
+        small sample, so read the counts before the result."""
+        opening, closing, gone = two_dates(opening_loans, closing_loans, closing_settings, opening_settings, write_offs)
+        return review.challenger(opening, closing, write_offs=gone, months=months)
+
+    @server.tool(annotations=READ_ONLY)
+    @_told
     def assess_individual(case: str) -> dict[str, Any]:
         """Allowance of one credit-impaired debtor assessed individually, from a case file (.json) in the
         allowed folder. The case lists the debtor, the lender's exposures (gross carrying amount, effective
@@ -299,6 +453,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return individual.assess(raw)
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def collateral_recovery(
         value: float,
         eir: float,
@@ -333,6 +488,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         )
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def turkey_reclassification_check(
         check: Literal["performing_again", "restructured_npl_to_group_2", "exit_restructured_status"],
         facts: dict[str, Any],

@@ -13,7 +13,7 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
 - **Classification and measurement** (business model, SPPI test) and **hedge accounting**.
 - **Purchased or originated credit-impaired assets** (credit-adjusted effective interest rate,
   allowance as the cumulative change in lifetime ECL).
-- **Allowance movement table** (IFRS 7 35H-35I) and interest revenue by stage. Planned.
+- **Interest revenue by stage**, and the unwinding of discount as a line of its own.
 - **Modification gains and losses.** A restructured loan is staged through its flags; the change in
   gross carrying amount is not computed.
 - **Financial guarantees and lease receivables** as instruments of their own. A guarantee can be
@@ -38,8 +38,9 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
 - **LGD** is taken as given, measured at the default date, constant over the life of the loan in the
   portfolio run. Use the `lgd` module for collateral-based term structures in your own code. Do not
   feed regulatory downturn LGDs: IFRS 9 asks for a best estimate.
-- **Stage 3** is measured as exposure times `lgd_default`. It is not scenario-weighted and not
-  discounted again; put the present value into the rate.
+- **Stage 3** is measured as exposure times `lgd_default`, or as the `individual_ecl` you supply for
+  the loan. Neither is scenario-weighted or discounted again by the portfolio run; put the present
+  value into the rate, or compute the allowance with `ifrs9 individual`.
 - **Constant hazard.** A loan with only `pd_12m` gets a flat curve. An origination PD given as
   `pd_12m_origination` is extended the same way, so for those loans the comparison reduces to a
   comparison of annual PDs. Supply `pd_origination_remaining` or grades with a matrix for a real term
@@ -83,6 +84,48 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
   A loan leaving stage 3 passes through stage 2 for the probation period.
 - "Primary reason" depends on the order of precedence, which is a setting.
 
+## Reviewing reported figures
+
+- **Reported figures are compared, never used.** `reported_stage` and `reported_ecl` do not enter any
+  calculation. A difference says that the two sets of inputs or rules differ, not which one is right.
+- **The 5% and 10% thresholds** are those of the ECB asset quality review (2018), where the challenger
+  is compared with the lender's allowance at portfolio level. They are parameters, not rules of IFRS 9.
+- **The split of the gap** into staging and measurement prices the stage differences with the
+  recalculated parameters. Priced with the lender's own parameters the split would differ.
+- **Scenario response** shifts every forecast year of one scenario by the same amount and uses that
+  scenario alone. It is a sensitivity, not a forecast, and it inherits the one-factor model and the
+  correlations in your settings.
+- **The challenger matrix** needs grades. It counts one period of moves in your own two files, which is
+  a small sample: a grade with few loans gives a rough row, and the default rate of one year is not a
+  long-run rate. Segments without grades (PD given per loan) are not challenged. The observed matrix
+  also replaces the origination view of loans whose origination risk is a grade.
+
+## From one date to the next
+
+- **Two snapshots, nothing in between.** A loan that moved to stage 2 and back, or was restructured and
+  cured between the dates, looks unchanged. Movements are opening against closing, not the sum of
+  shorter periods; summing quarterly tables gives larger gross transfers.
+- **The order of the drivers changes the split.** IFRS 7 prescribes none. The default order is settings
+  and scenarios, exposure and time, PD, LGD, other; any other order gives the same total.
+- **Transfers are shown at the opening amount**, and the remeasurement on transfer uses the opening
+  inputs. Other presentations (transfer at the closing amount) are equally common.
+- **Write-offs and derecognitions release the opening allowance.** The amount actually written off, a
+  loss beyond the allowance, recoveries after write-off, modification gains or losses and foreign
+  exchange are not in the table. A loan missing from the closing file is derecognised unless you list
+  it as written off.
+- **The unwinding of discount** is inside "repayments, drawdowns and passage of time".
+- **New loans** are shown at their closing allowance, in their closing stage.
+- **A change of rating scale or of model between the dates** can make a step of the attribution
+  impossible to compute (a grade of the old scale under the new settings). The error names the step;
+  another order usually works, and the total is the same in every order.
+- **Staging quality and backtest**: a written-off loan counts as a default; a loan that left for
+  another reason counts as not defaulted in the backtest and is left out of the default rates of the
+  staging table. Time spent in stage 2 before default cannot be seen in two snapshots.
+- **The backtest** compares counts of defaults, not losses. The split into forecast error and model
+  error needs the state of the economy that occurred (z), which is your estimate.
+- **Settings of the earlier date** default to those of the later date; then nothing is attributed to
+  settings, and the opening allowance is not what was reported at the time.
+
 ## Individual assessment
 
 - **Judgement stays with you.** Whether the business survives, how likely each scenario is, what the
@@ -92,8 +135,8 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
   on non-performing loans (2017): multiples of 6, 10 and 12, a discount of at least 10% in an auction,
   18 months past due, valuations within 12 months. They are not rules of IFRS 9 and not rules of any
   other supervisor. They never change a result.
-- **Not linked to the portfolio run.** `ifrs9 run` still measures stage 3 as exposure times
-  `lgd_default`. Take the allowance from the case and put it into the rate, or report it separately.
+- **Linked to the portfolio run by a column.** The case file and the loan file are separate; you carry
+  the allowance over in `individual_ecl`. It is used only while the loan is in stage 3.
 - **Annual steps** in the two-step approach; cash is assumed to arrive at the end of each year.
   Collateral sales and other dated flows can fall at any fraction of a year.
 - **Claims are nominal.** Other creditors' claims and the lender's exposures do not accrue interest
@@ -109,6 +152,10 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
   give).
 - **One collateral item securing several exposures** is split by the fractions you give, and each part
   is discounted at that exposure's own effective interest rate, not at a weighted average rate.
+- **Market price** is applied to the whole exposure, the gross carrying amount plus the present value
+  of expected drawings.
+- **The lender's share of a collateral item** next to equal-ranking claims is the secured exposures
+  (including expected drawings) over those exposures plus the other claims, unless you give `share`.
 - **The allowance is split** between the loan and the undrawn commitment in proportion to the gross
   carrying amount and the present value of expected drawings.
 - Groups of connected debtors, several currencies, guarantees as a separate source of recovery and

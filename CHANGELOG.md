@@ -1,7 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
+- Review of reported figures (`review`): `ifrs9 reconcile` puts the lender's `reported_stage` and
+  `reported_ecl` next to the recalculation, with the ECB asset quality review thresholds and the gap
+  split into staging and measurement; `ifrs9 response` gives the allowance as the base scenario is
+  moved; `ifrs9 challenger` recomputes the allowance with the rating migration observed between two
+  loan files.
+- From one date to the next (`period`): `ifrs9 movement` reconciles the opening to the closing
+  allowance and gross carrying amount by stage (IFRS 7 35H-35I) and splits the change of continuing
+  loans into drivers, with the loans behind it; `ifrs9 staging-quality`; `ifrs9 backtest` with the
+  split into forecast error and model error.
+- New optional loan-file columns `reported_stage`, `reported_ecl` and `individual_ecl`; the last one
+  replaces exposure times `lgd_default` for a loan in stage 3.
+- `ifrs9 sample` also writes the portfolio of the year before, its settings, a write-off list and
+  reported figures with planted differences. Loans more than 90 days past due in the sample are now at
+  least 14 months old; no result of the sample changes.
+- Six more MCP tools, eighteen in all.
 - Individual assessment of credit-impaired debtors (`individual`, `ifrs9 individual`, MCP tools
   `assess_individual` and `collateral_recovery`): gone concern, steady-state and two-step going concern,
   market price; sharing of cash by seniority; probability-weighted scenarios; undrawn commitments;

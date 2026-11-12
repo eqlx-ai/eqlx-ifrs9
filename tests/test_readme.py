@@ -58,6 +58,56 @@ def test_individual_assessment_shown_in_the_readme():
     assert f"# {pv:.2f}" in README
 
 
+def test_review_and_period_sections_shown_in_the_readme():
+    from eqlx_ifrs9 import period, review
+
+    s = synthetic.generate()
+    opening = engine.run(data.from_text(s.previous_csv), config.from_dict(s.previous_settings))
+    closing = engine.run(data.from_text(s.csv), config.from_dict(s.settings))
+    gone = s.write_offs_csv.split()[1:]
+
+    block = re.search(r"```text\n(allowance .*?)```", README, re.S)
+    assert block is not None
+    assert block.group(1).strip() == period.text_movement(period.movement(opening, closing, write_offs=gone)).strip()
+
+    rec = review.reconcile(closing)
+    al = rec["allowance"]
+    for name, x in [("all loans", al["total"])] + [(x["segment"], x) for x in al["by_segment"]]:
+        row = f"| {name} | {x['reported']:,.0f} | {x['recalculated']:,.0f} | {x['relative']:+.1%} | {x['verdict']} |"
+        assert row in README
+    gap = al["gap_of_loans_with_both_figures"]
+    assert f"{rec['stages']['reported_in_a_lower_stage']['loans']} loans are reported in stage 1" in README
+    for value in (gap["difference"], gap["from_staging"], gap["from_measurement"]):
+        assert f"{value:,.0f}" in README
+
+    resp = review.response(closing.loans, closing.config)
+    for pt in resp["points"]:
+        shift = "0" if pt["shift"] == 0 else f"{pt['shift']:+g}"
+        row = f"| {shift} | {pt['ecl_stages_held']:,.0f} | {pt['ecl_restaged']:,.0f} | {pt['stage_2_share_of_exposure']:.1%} |"
+        assert row in README
+    assert f"costs {resp['asymmetry']['ratio']:.1f} times" in README
+
+    q = period.staging_quality(opening, closing, write_offs=gone)
+    inflow, dr = q["stage_3_inflow"], q["default_rate_by_opening_stage"]
+    assert f"{inflow['loans']} loans went to stage 3, {inflow['directly_from_stage_1']} of them straight" in README
+    assert (
+        f"default rate {dr['stage_1']['rate']:.2%} in stage 1 against {dr['stage_2']['rate']:.1%} in stage 2" in README
+    )
+    assert f"{q['what_became_of_stage_2']['back_to_stage_1']:.1%} of stage 2 went back" in README
+    bt = period.backtest(opening, closing, write_offs=gone, realised_z=-0.6)["total"]
+    assert f"{bt['expected_weighted']:.1f} defaults expected, {bt['defaults']} happened" in README
+    assert (
+        f"give {bt['expected_realised_economy']:.1f}, so the forecast was off by {bt['forecast_error']:+.1f}" in README
+    )
+    assert f"the model by {bt['model_error']:+.1f}" in README
+    ch = review.challenger(opening, closing, write_offs=gone)
+    seg = ch["segments"][0]
+    assert (
+        f"corporate allowance {seg['with_observed_matrix']:,.0f} against {seg['reported']:,.0f} reported: "
+        f"{seg['relative']:+.1%}, {seg['verdict']} ({ch['observed'][0]['observations']} loans observed)"
+    ) in README
+
+
 def test_every_mcp_tool_is_listed():
     pytest.importorskip("mcp")
     import asyncio

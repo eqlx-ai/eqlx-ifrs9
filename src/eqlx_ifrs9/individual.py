@@ -9,7 +9,7 @@ the ECB has published for reviewing such files (Asset Quality Review Phase 2 Man
 - **gone concern**: operating cash flows stop and the collateral is sold;
 - **going concern, steady state**: one sustainable year of cash flow times a multiple;
 - **going concern, two step**: a year-by-year projection plus a terminal value;
-- **market price**: an observable price as a practical expedient.
+- **market price**: an observable price as a practical expedient, applied to the whole exposure.
 
 Cash is shared among all creditors by effective seniority. Everything is arithmetic on the inputs:
 whether a business plan is credible, what a property is worth and how the claims rank in law are
@@ -19,12 +19,15 @@ the result carries a warning; nothing is corrected silently.
 
 from __future__ import annotations
 
+import functools
 import math
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, ParamSpec, TypeVar
 
 from .errors import InputError
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 AQR = "ECB Asset Quality Review Phase 2 Manual (2018)"
 NPL = "ECB Guidance to banks on non-performing loans (2017)"
 
@@ -36,15 +39,20 @@ MAX_VALUATION_AGE_MONTHS = 12
 MIN_PROJECTION_YEARS, MAX_PROJECTION_YEARS = 3, 10  # AQR 4.6.7
 MARKET_PRICE_TOLERANCE = 0.10  # AQR 4.6.4.2
 APPROACHES = ("gone_concern", "steady_state", "two_step", "market_price")
+MAX_NUMBER = 1e18  # the largest amount, and the bound on what a result may reach
+MAX_YEARS = 100.0
 _EPS = 1e-12
 
 
 def _num(where: str, value: Any, *, low: float | None = None, high: float | None = None) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InputError(f"{where} must be a number, got {value!r}")
-    x = float(value)
-    if not math.isfinite(x):
-        raise InputError(f"{where} must be finite")
+    try:
+        x = float(value)
+    except OverflowError:
+        raise InputError(f"{where} is too large") from None
+    if not math.isfinite(x) or abs(x) > MAX_NUMBER:
+        raise InputError(f"{where} must be finite and at most {MAX_NUMBER:g} in size")
     if low is not None and x < low:
         raise InputError(f"{where} must be at least {low:g}, got {x:g}")
     if high is not None and x > high:
@@ -111,6 +119,22 @@ def _flows(where: str, value: Any) -> list[tuple[float, float]]:
     return out
 
 
+def _guard(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Figures that overflow are an input problem, not a crash."""
+
+    @functools.wraps(fn)
+    def inner(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        try:
+            return fn(*args, **kwargs)
+        except (OverflowError, ZeroDivisionError, RecursionError) as exc:
+            raise InputError(
+                f"the figures cannot be computed ({type(exc).__name__}): check rates, years and amounts"
+            ) from exc
+
+    return inner
+
+
+@_guard
 def collateral_recovery(
     value: float,
     eir: float,
@@ -138,9 +162,9 @@ def collateral_recovery(
     """
     v = _num("value", value, low=0.0)
     r = _rate("eir", eir)
-    t_sale = _num("years_to_sale", years_to_sale, low=0.0)
+    t_sale = _num("years_to_sale", years_to_sale, low=0.0, high=MAX_YEARS)
     h = _num("haircut", haircut, low=0.0, high=1.0)
-    change = _num("value_change", value_change, low=-1.0)
+    change = _num("value_change", value_change, low=-1.0, high=100.0)
     sell = _num("selling_cost_rate", selling_cost_rate, low=0.0, high=1.0)
     hold = _num("annual_cost_rate", annual_cost_rate, low=0.0)
     prior = _num("prior_claims", prior_claims, low=0.0)
@@ -234,8 +258,8 @@ def sustainable_cash_flow(
         "income_tax": tax,
         "owner_payout": payout,
         "capex": cap,
-        "cash_flow_adjustment": -(tax + payout + cap),
-        "sustainability_adjustment": -sustain,
+        "cash_flow_adjustment": 0.0 - (tax + payout + cap),
+        "sustainability_adjustment": 0.0 - sustain,
         "sustainable_cash_flow": e - tax - payout - cap - sustain,
     }
 
@@ -257,6 +281,8 @@ def allocate(amount: float, exposure: float, preferred_claims: float = 0.0, pari
 def waterfall(amount: float, claims: Sequence[tuple[int, float]]) -> list[float]:
     """Share ``amount`` among ``(rank, claim)`` pairs: rank 1 is paid first, equal ranks pro rata."""
     left = _num("amount", amount, low=0.0)
+    if any(not isinstance(c, Sequence) or isinstance(c, (str, bytes)) or len(c) != 2 for c in claims):
+        raise InputError("claims must be pairs of (rank, amount)")
     ranks = [_rank(f"claims[{i}] rank", r) for i, (r, _) in enumerate(claims)]
     owed = [_num(f"claims[{i}] amount", c, low=0.0) for i, (_, c) in enumerate(claims)]
     paid = [0.0] * len(owed)
@@ -343,6 +369,7 @@ def _check_sale(where: str, sale: Mapping[str, Any]) -> None:
         _num(f"{where}.foreclosed_months_ago", sale["foreclosed_months_ago"], low=0.0)
 
 
+@_guard
 def assess(case: Mapping[str, Any]) -> dict[str, Any]:
     """Allowance of every exposure to one debtor, from a case file.
 
@@ -362,7 +389,13 @@ def assess(case: Mapping[str, Any]) -> dict[str, Any]:
     debtor = _obj("debtor", top["debtor"], ("id", "sector", "months_past_due", "ebitda_history"), ("id",))
     _text("debtor.id", debtor["id"])
     sector = debtor.get("sector")
-    if sector is not None and sector not in BENCHMARK_MULTIPLES:
+    arrears = debtor.get("months_past_due")
+    if arrears is not None:
+        arrears = _num("debtor.months_past_due", arrears, low=0.0)
+    history = [
+        _num("debtor.ebitda_history", x) for x in _list("debtor.ebitda_history", debtor.get("ebitda_history", []))
+    ]
+    if sector is not None and (not isinstance(sector, str) or sector not in BENCHMARK_MULTIPLES):
         raise InputError(f"debtor.sector must be one of {', '.join(BENCHMARK_MULTIPLES)}")
     benchmark = BENCHMARK_MULTIPLES[sector or "other"]
     warnings: list[dict[str, str]] = []
@@ -454,8 +487,8 @@ def assess(case: Mapping[str, Any]) -> dict[str, Any]:
             share = _num(f"{at}.share", c["share"], low=0.0, high=1.0)
         else:
             pari = _num(f"{at}.pari_passu_claims", c.get("pari_passu_claims", 0.0), low=0.0)
-            own = math.fsum(by_id[k]["gross"] for k in split)
-            share = own / (own + pari) if own + pari > 0.0 else 0.0
+            own = math.fsum(by_id[k]["total"] for k, fraction in split.items() if fraction > 0.0)
+            share = own / (own + pari) if pari > 0.0 else 1.0
         age = c.get("valuation_age_months")
         if age is not None and _num(f"{at}.valuation_age_months", age, low=0.0) > MAX_VALUATION_AGE_MONTHS:
             warnings.append(
@@ -606,8 +639,7 @@ def assess(case: Mapping[str, Any]) -> dict[str, Any]:
         detail: dict[str, Any] = {}
 
         if approach in _GOING:
-            arrears = debtor.get("months_past_due")
-            if arrears is not None and _num("debtor.months_past_due", arrears, low=0.0) > GONE_CONCERN_ARREARS_MONTHS:
+            if arrears is not None and arrears > GONE_CONCERN_ARREARS_MONTHS:
                 warnings.append(
                     _warning(
                         "gone_concern_presumed",
@@ -617,9 +649,6 @@ def assess(case: Mapping[str, Any]) -> dict[str, Any]:
                         f"{NPL}, 6.2.4",
                     )
                 )
-            history = [
-                _num("debtor.ebitda_history", x) for x in _list("ebitda_history", debtor.get("ebitda_history", []))
-            ]
             if len(history) >= 2 and history[-1] < 0.0 and history[-2] < 0.0:
                 warnings.append(
                     _warning(
@@ -729,7 +758,7 @@ def assess(case: Mapping[str, Any]) -> dict[str, Any]:
                 raise InputError(f"{at}: missing price")
             price = _num(f"{at}.price", sc["price"], low=0.0)
             for e in exposures:
-                cash[e["id"]] = price * e["gross"]
+                cash[e["id"]] = price * e["total"]
             detail = {"price": price}
 
         sold = []
@@ -754,7 +783,7 @@ def assess(case: Mapping[str, Any]) -> dict[str, Any]:
                 "shortfall": e["total"] - recoverable,
             }
             if approach in _GOING and e["price"] is not None:
-                at_price = e["price"] * e["gross"]
+                at_price = e["price"] * e["total"]
                 if recoverable > at_price * (1.0 + MARKET_PRICE_TOLERANCE) + _EPS:
                     warnings.append(
                         _warning(
@@ -781,11 +810,12 @@ def assess(case: Mapping[str, Any]) -> dict[str, Any]:
     weight = math.fsum(r["probability"] for r in results)
     if abs(weight - 1.0) > 1e-9:
         raise InputError(f"scenario probabilities add up to {weight:g}, not 1")
-    if len(results) == 1:
+    likely = [r["name"] for r in results if r["probability"] > 0.0]
+    if len(likely) == 1:
         warnings.append(
             _warning(
                 "single_scenario",
-                names[0],
+                likely[0],
                 "one scenario only: expected credit losses are a probability-weighted amount over a range of "
                 "outcomes, including the one that is less likely",
                 "IFRS 9 5.5.17(a), 5.5.18",

@@ -13,7 +13,9 @@ from . import (
     engine,
     individual,
     lgd,
+    period,
     report,
+    review,
     scenarios,
     schedule,
     simplified,
@@ -25,7 +27,7 @@ from .ecl import ECLResult, discount_factors, expected_credit_loss, loss_rate_ec
 from .errors import InputError
 from .schedule import Schedule
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "ECLResult",
@@ -43,7 +45,9 @@ __all__ = [
     "individual",
     "lgd",
     "loss_rate_ecl",
+    "period",
     "report",
+    "review",
     "scenarios",
     "schedule",
     "simplified",

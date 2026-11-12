@@ -2,6 +2,10 @@
 
 :func:`generate` returns the loan file as CSV text, a settings object and a list of planted cases:
 loans built so that a specific rule decides their stage. The same seed always gives the same file.
+
+The loan file also carries what a lender would report itself (``reported_stage``, ``reported_ecl``),
+with planted differences, and the sample comes with the same portfolio one year earlier, its
+settings and a list of loans written off in between, for the period-to-period reports.
 """
 
 from __future__ import annotations
@@ -77,6 +81,17 @@ class Sample:
     csv: str
     settings: dict[str, Any]
     planted: tuple[Planted, ...]
+    previous_csv: str = ""
+    """The same portfolio one year earlier."""
+    previous_settings: dict[str, Any] | None = None
+    write_offs_csv: str = ""
+    """Loans of the earlier file that were written off during the year (column ``loan_id``)."""
+
+
+REPORTED = ("reported_stage", "reported_ecl")
+# What the made-up lender does differently from the recalculation.
+KEPT_IN_STAGE_1_EVERY = 7  # every 7th loan that the PD test moves to stage 2 stays in stage 1
+REPORTED_FACTOR = {"cards": 0.86, "mortgage": 0.93}  # share of the recalculated allowance that is booked
 
 
 def settings(profile: str | None = "tr_bddk") -> dict[str, Any]:
@@ -151,6 +166,8 @@ def generate(n_loans: int = 2000, seed: int = 7, profile: str | None = "tr_bddk"
         lid = f"L{i + 1:06d}"
         dpd = pick((0, 0, 12, 25, 45, 75, 120, 250), (0.80, 0.08, 0.04, 0.03, 0.02, 0.012, 0.012, 0.006))
         common = dict(loan_id=lid, segment=seg, dpd=dpd, months_on_book=int(u(1, 60)))
+        if dpd > 90:  # a loan this far past due is not a new loan
+            common["months_on_book"] = max(common["months_on_book"], 14)
         common["forborne"] = int(rng.random() < 0.02)
         common["watchlist"] = int(rng.random() < 0.02)
         if seg == "corporate":
@@ -317,11 +334,144 @@ def generate(n_loans: int = 2000, seed: int = 7, profile: str | None = "tr_bddk"
             "not past due itself; another loan of the same borrower is non-performing (BDDK Article 5(5))",
         ),
     )
+    cfg = settings(profile)
+    text = _csv(rows, COLUMNS)
+    previous_rows, written_off = _previous(rows, seed)
+    return Sample(
+        _with_reported(text, cfg),
+        cfg,
+        planted,
+        _csv(previous_rows, COLUMNS),
+        previous_settings(profile),
+        "loan_id\n" + "".join(f"{x}\n" for x in written_off),
+    )
+
+
+def _csv(rows: list[dict[str, Any]], columns: tuple[str, ...]) -> str:
     buf = io.StringIO()
-    buf.write(",".join(COLUMNS) + "\n")
+    buf.write(",".join(columns) + "\n")
     for r in rows:
-        buf.write(",".join(str(r[c]) for c in COLUMNS) + "\n")
-    return Sample(buf.getvalue(), settings(profile), planted)
+        buf.write(",".join(str(r[c]) for c in columns) + "\n")
+    return buf.getvalue()
+
+
+def previous_settings(profile: str | None = "tr_bddk") -> dict[str, Any]:
+    """Settings of the earlier date: a milder outlook and a little less weight on the downside."""
+    out = settings(profile)
+    out["scenarios"] = [
+        {"name": "base", "weight": 0.65, "z": [0.2, 0.3, 0.3]},
+        {"name": "downside", "weight": 0.20, "z": [-1.2, -0.8, -0.3]},
+        {"name": "upside", "weight": 0.15, "z": [1.0, 0.8, 0.5]},
+    ]
+    return out
+
+
+def _with_reported(text: str, cfg: dict[str, Any]) -> str:
+    """Append the lender's own stage and allowance to every row of the loan file."""
+    from . import config, data, engine
+    from .staging import Reason
+
+    r = engine.run(data.from_text(text), config.from_dict(cfg))
+    ids = r.loans.text["loan_id"]
+    stage = r.stage.copy()
+    by_pd = [
+        i
+        for i in np.argsort(ids, kind="stable").tolist()
+        if r.stage[i] == 2 and r.primary[i] == int(Reason.PD_RELATIVE) and not str(ids[i]).startswith("CASE")
+    ]
+    stage[by_pd[KEPT_IN_STAGE_1_EVERY - 1 :: KEPT_IN_STAGE_1_EVERY]] = 1
+    factor = np.array([REPORTED_FACTOR.get(str(sg), 1.0) for sg in r.loans.text["segment"].tolist()])
+    booked = r.ecl_for_stages(stage) * factor
+    lines = text.rstrip("\n").split("\n")
+    out = [lines[0] + "," + ",".join(REPORTED)]
+    out += [f"{line},{int(stage[i])},{float(booked[i]):.2f}" for i, line in enumerate(lines[1:])]
+    return "\n".join(out) + "\n"
+
+
+def _previous(rows: list[dict[str, Any]], seed: int) -> tuple[list[dict[str, Any]], list[str]]:
+    """The portfolio one year earlier, and the ids of loans written off since.
+
+    Loans younger than a year did not exist yet. The others are a year younger, owe more, and were
+    mostly in better shape. Some loans exist only in the earlier file: repaid, or written off.
+    """
+    rng = np.random.default_rng(seed + 1000)
+
+    def u(lo: float, hi: float) -> float:
+        return float(lo + (hi - lo) * rng.random())
+
+    def pick(items: tuple[Any, ...], weights: tuple[float, ...]) -> Any:
+        x, acc = rng.random() * sum(weights), 0.0
+        for item, w in zip(items, weights, strict=True):
+            acc += w
+            if x < acc:
+                return item
+        return items[-1]
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        age = int(row["months_on_book"])
+        if age < 12:
+            continue
+        prev = dict(row)
+        prev["months_on_book"] = age - 12
+        prev["previous_stage"], prev["periods_without_trigger"] = 1, 12
+        rem = int(row["remaining_months"])
+        balance = float(row["balance"])
+        if row["product"] == "revolving":
+            limit = balance + float(row["undrawn"])
+            used = round(min(limit, balance * u(0.7, 1.2)), 2)
+            prev["balance"], prev["undrawn"] = used, round(limit - used, 2)
+        else:
+            prev["remaining_months"] = rem + 12
+            if row["amortization"] != "bullet":
+                prev["balance"] = round(balance * min(2.0, (rem + 12) / rem), 2)
+        dpd = int(row["dpd"])
+        if row["grade"] != "":
+            if dpd > 90:  # loans that have defaulted since were mostly weak already
+                prev["grade"] = pick(("C", "D", "E"), (0.15, 0.35, 0.50))
+            else:
+                g = GRADES.index(row["grade"]) + int(pick((-1, 0, 1), (0.25, 0.65, 0.10)))
+                prev["grade"] = GRADES[min(4, max(0, g))]
+        if row["pd_12m"] != "":
+            earlier = float(row["pd_12m"]) / float(pick((0.8, 1.0, 1.3, 2.0), (0.10, 0.60, 0.20, 0.10)))
+            prev["pd_12m"] = round(min(0.6, max(0.0005, earlier)), 6)
+        if dpd > 90:
+            prev["dpd"] = pick((dpd, 0, 15, 45, 60), (0.55, 0.05, 0.03, 0.20, 0.17))
+        elif dpd > 0:
+            prev["dpd"] = pick((0, dpd), (0.8, 0.2))
+        for flag in ("forborne", "watchlist"):
+            if int(row[flag]) and rng.random() < 0.7:
+                prev[flag] = 0
+        if rng.random() < 0.10:
+            prev["lgd"] = round(max(0.01, float(row["lgd"]) - 0.03), 3)
+        out.append(prev)
+
+    written_off: list[str] = []
+    for i in range(max(3, len(rows) // 12)):
+        lid = f"P{i + 1:06d}"
+        lost = i % 4 == 0
+        rate = round(u(0.20, 0.45), 4)
+        pd0 = u(0.01, 0.08)
+        out.append(
+            _row(
+                loan_id=lid,
+                segment="consumer",
+                consumer=1,
+                balance=round(u(5_000, 250_000), 2),
+                rate=rate,
+                eir=round(rate + 0.01, 4),
+                remaining_months=int(u(2, 12)),
+                months_on_book=int(u(12, 48)),
+                pd_12m=round(pd0 * (4.0 if lost else 1.0), 6),
+                pd_12m_origination=round(pd0, 6),
+                lgd=round(u(0.45, 0.75), 3),
+                lgd_default=round(u(0.60, 0.85), 3),
+                dpd=pick((150, 45), (0.6, 0.4)) if lost else 0,
+            )
+        )
+        if lost:
+            written_off.append(lid)
+    return out, written_off
 
 
 def individual_cases() -> dict[str, dict[str, Any]]:

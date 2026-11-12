@@ -20,6 +20,12 @@ Optional columns
     columns ``dpd``, ``forborne``, ``watchlist``, ``credit_impaired``, ``collective``,
     ``previous_stage``, ``periods_without_trigger``. With the Turkey profile also ``consumer``,
     ``unlikely_to_pay``, ``in_monitoring_year``, ``restructured_again``, ``judgement_group``.
+
+Figures that are compared or taken over, never recomputed
+    ``reported_stage`` and ``reported_ecl`` (the lender's own stage and allowance, for
+    :func:`eqlx_ifrs9.review.reconcile`) and ``individual_ecl`` (the allowance of an individually
+    assessed credit-impaired loan, e.g. from :mod:`eqlx_ifrs9.individual`; it replaces exposure times
+    ``lgd_default`` when the loan is in stage 3).
 """
 
 from __future__ import annotations
@@ -56,8 +62,19 @@ NUMERIC: dict[str, tuple[float, float, float]] = {
     "previous_stage": (np.nan, 1.0, 3.0),
     "periods_without_trigger": (np.nan, 0.0, 100000.0),
     "judgement_group": (np.nan, 1.0, 5.0),
+    "reported_stage": (np.nan, 1.0, 3.0),
+    "reported_ecl": (np.nan, 0.0, 1e18),
+    "individual_ecl": (np.nan, 0.0, 1e18),
 }
-WHOLE = {"remaining_months", "months_on_book", "previous_stage", "judgement_group", "dpd", "periods_without_trigger"}
+WHOLE = {
+    "remaining_months",
+    "months_on_book",
+    "previous_stage",
+    "judgement_group",
+    "dpd",
+    "periods_without_trigger",
+    "reported_stage",
+}
 _NUMBER = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", re.ASCII)
 FLAGS = (
     "forborne",
