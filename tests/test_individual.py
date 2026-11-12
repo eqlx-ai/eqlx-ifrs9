@@ -310,9 +310,45 @@ def test_market_price_scenario_and_comparison():
     case["scenarios"].append({"name": "sale of the loan", "probability": 0.3, "approach": "market_price", "price": 0.5})
     r = ind.assess(case)
     e = r["exposures"][0]
-    assert e["scenarios"][1]["recoverable"] == 100.0
-    assert e["ecl"] == pytest.approx(0.7 * (e["exposure"] - 141.7441863) + 0.3 * (e["exposure"] - 100.0))
+    assert e["scenarios"][1]["recoverable"] == pytest.approx(0.5 * e["exposure"])  # price on loan and commitment
+    assert e["ecl"] == pytest.approx(0.7 * (e["exposure"] - 141.7441863) + 0.3 * 0.5 * e["exposure"])
     assert [w["code"] for w in r["warnings"]] == ["above_market_price"]
+
+
+def test_a_loan_priced_at_par_loses_nothing_even_with_an_undrawn_line():
+    case = {
+        "debtor": {"id": "D"},
+        "exposures": [
+            {"id": "L", "gross_carrying_amount": 100.0, "eir": 0.0, "expected_draws": [{"year": 1, "amount": 50.0}]}
+        ],
+        "scenarios": [{"name": "s", "probability": 1.0, "approach": "market_price", "price": 1.0}],
+    }
+    assert ind.assess(case)["total"] == {"exposure": 150.0, "ecl": 0.0, "coverage": 0.0}
+
+
+def test_collateral_share_counts_expected_drawings():
+    def case(gross, draw, pari=None, secures="L"):
+        item = {"id": "C", "value": 100.0, "secures": secures, "central_to_cash_flows": False}
+        item["sale"] = {"years": 0, "haircut": 0.0}
+        if pari is not None:
+            item["pari_passu_claims"] = pari
+        loans = [
+            {"id": "L", "gross_carrying_amount": gross, "eir": 0.0, "expected_draws": [{"year": 0, "amount": draw}]}
+        ]
+        loans.append({"id": "M", "gross_carrying_amount": 400.0, "eir": 0.0})
+        return {
+            "debtor": {"id": "D"},
+            "exposures": loans,
+            "collateral": [item],
+            "scenarios": [{"name": "s", "probability": 1.0, "approach": "gone_concern"}],
+        }
+
+    def collected(c):
+        return ind.assess(c)["exposures"][0]["scenarios"][0]["collateral_value"]
+
+    assert collected(case(0.0, 100.0)) == 100.0  # nothing drawn yet: the collateral still belongs to the lender
+    assert collected(case(50.0, 50.0, pari=100.0)) == 50.0  # 100 of exposure next to 100 of other claims
+    assert collected(case(100.0, 0.0, pari=100.0, secures={"L": 1.0, "M": 0.0})) == 50.0  # M has no part in it
 
 
 # --- warnings --------------------------------------------------------------------------------
@@ -361,6 +397,12 @@ def test_gone_concern_past_18_months_is_what_is_expected():
     assert codes(cases()[1]) == set()
 
 
+def test_a_scenario_with_no_weight_is_not_a_second_scenario():
+    case = gone(sale={"years": 1, "haircut": 0.2})
+    case["scenarios"].append({"name": "never", "probability": 0.0, "approach": "gone_concern"})
+    assert codes(case) == {"single_scenario"}
+
+
 # --- input -----------------------------------------------------------------------------------
 
 
@@ -399,11 +441,36 @@ def broken(change):
         lambda c: c["scenarios"][1].update(cash_flows=[1, 2, 3]),
         lambda c: c.update(scenarios=[]),
         lambda c: c.update(exposures=[]),
+        lambda c: c["debtor"].update(sector=[]),
+        lambda c: c["debtor"].update(months_past_due="abc"),
+        lambda c: c["debtor"].update(ebitda_history="abc"),
+        lambda c: c["exposures"][0].update(gross_carrying_amount=10**400),
+        lambda c: c["exposures"][0].update(gross_carrying_amount=1e19),
+        lambda c: c["collateral"][0]["sale"].update(years=400),
+        lambda c: c["collateral"][0]["sale"].update(value_change=1e6),
     ],
 )
 def test_bad_input_is_refused(change):
     with pytest.raises(InputError):
         ind.assess(broken(change))
+
+
+def test_debtor_fields_are_checked_in_every_case():
+    case = cases()[1]  # gone concern only: these fields are not used, and still checked
+    case["debtor"]["months_past_due"] = "abc"
+    with pytest.raises(InputError, match="months_past_due"):
+        ind.assess(case)
+
+
+def test_figures_that_overflow_are_refused_not_crashed():
+    with pytest.raises(InputError):
+        ind.collateral_recovery(100.0, -0.9, years_to_sale=400, haircut=0.1)
+    with pytest.raises(InputError):
+        ind.collateral_recovery(1e308, 0.05, years_to_sale=1, haircut=0.1, value_change=5)
+    with pytest.raises(InputError, match="pairs"):
+        ind.waterfall(10, [(1, 5), (1,)])
+    flat = ind.sustainable_cash_flow(ebitda=10.0, income_tax=0.0)
+    assert str(flat["cash_flow_adjustment"]) == "0.0" and str(flat["sustainability_adjustment"]) == "0.0"
 
 
 def test_draws_after_the_projection_are_refused():
@@ -435,4 +502,8 @@ def test_command_line(tmp_path, capsys):
     (tmp_path / "list.json").write_text("[1, 2]")
     assert main(["individual", str(tmp_path / "list.json")]) == 2
     assert main(["individual", str(tmp_path / "missing.json")]) == 2
+    (tmp_path / "latin.json").write_bytes(b'\xff\xfe{"a": 1}')
+    assert main(["individual", str(tmp_path / "latin.json")]) == 2
+    (tmp_path / "deep.json").write_text("[" * 5000 + "]" * 5000)
+    assert main(["individual", str(tmp_path / "deep.json")]) == 2
     assert "error:" in capsys.readouterr().err

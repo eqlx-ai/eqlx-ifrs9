@@ -115,6 +115,9 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
   it as written off.
 - **The unwinding of discount** is inside "repayments, drawdowns and passage of time".
 - **New loans** are shown at their closing allowance, in their closing stage.
+- **A change of rating scale or of model between the dates** can make a step of the attribution
+  impossible to compute (a grade of the old scale under the new settings). The error names the step;
+  another order usually works, and the total is the same in every order.
 - **Staging quality and backtest**: a written-off loan counts as a default; a loan that left for
   another reason counts as not defaulted in the backtest and is left out of the default rates of the
   staging table. Time spent in stage 2 before default cannot be seen in two snapshots.
@@ -149,6 +152,10 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
   give).
 - **One collateral item securing several exposures** is split by the fractions you give, and each part
   is discounted at that exposure's own effective interest rate, not at a weighted average rate.
+- **Market price** is applied to the whole exposure, the gross carrying amount plus the present value
+  of expected drawings.
+- **The lender's share of a collateral item** next to equal-ranking claims is the secured exposures
+  (including expected drawings) over those exposures plus the other claims, unless you give `share`.
 - **The allowance is split** between the loan and the undrawn commitment in proportion to the gross
   carrying amount and the present value of expected drawings.
 - Groups of connected debtors, several currencies, guarantees as a separate source of recovery and

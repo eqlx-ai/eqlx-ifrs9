@@ -17,6 +17,7 @@ needs an explanation, above 10% it is investigated. They are parameters.
 from __future__ import annotations
 
 import dataclasses
+import math
 import warnings
 from collections.abc import Iterable, Sequence
 from typing import Any
@@ -135,7 +136,7 @@ def reconcile(
         seg = loans.text["segment"]
 
         def gap(mask: NDArray[np.bool_]) -> dict[str, Any]:
-            return _compare(float(r.ecl[mask].sum()), float(rep_ecl[mask].sum()), immaterial, investigate)
+            return _compare(math.fsum(r.ecl[mask].tolist()), math.fsum(rep_ecl[mask].tolist()), immaterial, investigate)
 
         allowance: dict[str, Any] = {
             "loans_compared": int(has_ecl.sum()),
@@ -194,9 +195,12 @@ def response(
     base = found[0]
     if base.z is None:
         raise InputError(f"scenario {name!r} has no z path: there is nothing to shift")
-    values = sorted({float(x) for x in shifts} | {0.0})
-    if not all(np.isfinite(values)) or len(values) > 41:
-        raise InputError("shifts must be finite numbers, at most 40 of them")
+    try:
+        values = sorted({float(x) for x in shifts} | {0.0})
+    except (TypeError, ValueError):
+        raise InputError("shifts must be a list of numbers") from None
+    if not all(abs(v) <= period.MAX_Z for v in values) or len(values) > 41:
+        raise InputError(f"shifts must lie between -{period.MAX_Z:g} and {period.MAX_Z:g}, at most 40 of them")
     main = engine.run(loans, config)
     points: list[dict[str, Any]] = []
     for shift in values:

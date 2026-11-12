@@ -463,6 +463,9 @@ def run(loans: Loans, config: Config) -> PortfolioResult:
         warnings.append(
             f"{int(unused.sum())} loans have an individual_ecl but are not in stage 3: it is not used for them"
         )
+    above = ~np.isnan(individual) & (stage == 3) & (individual > exposure)
+    if np.any(above):
+        warnings.append(f"{int(above.sum())} loans have an individual_ecl larger than their exposure")
     ecl = np.where(stage == 1, ecl12_w, np.where(stage == 2, life_w, ecl_default))
     return PortfolioResult(
         loans=loans,

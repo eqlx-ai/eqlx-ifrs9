@@ -21,6 +21,7 @@ from __future__ import annotations
 import csv
 import dataclasses
 import math
+import warnings as np_warnings
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,7 +56,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "amortization",
         "product",
     ),
-    "pd": ("pd_12m", "grade", "segment"),
+    "pd": ("pd_12m", "grade", "segment", "grade_origination"),
     "lgd": ("lgd", "lgd_default", "individual_ecl"),
 }
 LABELS = {
@@ -76,6 +77,7 @@ LABELS = {
     "closing_balance": "closing balance",
 }
 MIN_OBSERVATIONS = 30
+MAX_Z = 10.0  # standard deviations of the economy; beyond this the one-factor shift is meaningless
 
 
 @dataclass(frozen=True, eq=False)
@@ -103,11 +105,11 @@ def pair(opening: PortfolioResult, closing: PortfolioResult, write_offs: Iterabl
     known = set(ids_o.tolist())
     strangers = [x for x in listed if x not in known]
     if strangers:
-        raise InputError(f"write-offs: {strangers[0]!r} is not a loan of the opening file")
+        raise InputError(f"write-offs: {strangers[0]} is not a loan of the opening file")
     wo = np.isin(ids_o, np.array(listed, dtype=np.str_)) if listed else np.zeros(ids_o.size, dtype=bool)
     still = np.nonzero(wo & in_closing)[0]
     if still.size:
-        raise InputError(f"write-offs: {ids_o[still[0]]!r} is still in the closing file")
+        raise InputError(f"write-offs: {ids_o[still[0]]!s} is still in the closing file")
 
     def by_id(ids: NDArray[np.str_], mask: NDArray[np.bool_]) -> NDArray[np.intp]:
         idx = np.nonzero(mask)[0]
@@ -125,7 +127,8 @@ def pair(opening: PortfolioResult, closing: PortfolioResult, write_offs: Iterabl
 
 
 def _by_stage(values: Array, stage: NDArray[np.int8]) -> Array:
-    return np.array([float(values[stage == s].sum()) for s in STAGES])
+    # fsum: the totals do not depend on the order of the rows in the file
+    return np.array([math.fsum(values[stage == s].tolist()) for s in STAGES])
 
 
 def _line(key: str, v: Array) -> dict[str, Any]:
@@ -208,7 +211,14 @@ def movement(
             else:
                 hybrid = _substitute(hybrid, target, GROUPS[driver])
             last = k == len(order) - 1
-            current = closing.ecl[p.ic] if last else engine.run(hybrid, config).ecl_for_stages(sc)
+            try:
+                current = closing.ecl[p.ic] if last else engine.run(hybrid, config).ecl_for_stages(sc)
+            except InputError as exc:
+                raise InputError(
+                    f"movement: after replacing {', '.join(order[: k + 1])} the loans can no longer be computed "
+                    f"({exc}). The loan files and the settings changed together; try another order, for example "
+                    "pd,other,settings,exposure,lgd"
+                ) from exc
             delta[driver] = current - previous
             previous = current
     else:
@@ -295,6 +305,7 @@ def movement(
         "largest_difference_between_rows_and_closing_balance": gap,
         "notes": [
             "transfers are shown at the opening amount and add up to zero across the stages",
+            "rows and closing balance agree up to the rounding of floating-point sums",
             "the split into drivers depends on the order shown; the total does not",
             "write-offs and derecognitions release the opening allowance of the loan; a loss beyond that "
             "allowance is not in this table",
@@ -315,7 +326,8 @@ def text_movement(m: dict[str, Any]) -> str:
     for title, key in (("loss allowance", "loss_allowance"), ("gross carrying amount", "gross_carrying_amount")):
         lines += ["", f"{title:<46}{'stage 1':>18}{'stage 2':>18}{'stage 3':>18}{'total':>18}"]
         for r in m[key]:
-            cells = "".join(f"{r[k]:>18,.2f}" for k in ("stage_1", "stage_2", "stage_3", "total"))
+            # round first: a sum that is zero up to rounding must not print as -0.00
+            cells = "".join(f"{round(r[k], 2) + 0.0:>18,.2f}" for k in ("stage_1", "stage_2", "stage_3", "total"))
             lines.append(f"{r['label']:<46}{cells}")
     lines += ["", "order of the drivers: " + ", ".join(m["order"])]
     return "\n".join(lines)
@@ -328,6 +340,8 @@ def read_write_offs(source: str | Path) -> list[str]:
             rows = list(csv.reader(fh))
     except UnicodeDecodeError as exc:
         raise InputError(f"{source}: the write-off file is not UTF-8 text") from exc
+    except csv.Error as exc:
+        raise InputError(f"{source}: the write-off file cannot be read ({exc})") from exc
     if not rows:
         raise InputError(f"{source}: the write-off file is empty")
     header = [h.strip().lower() for h in rows[0]]
@@ -384,6 +398,8 @@ def staging_quality(
     inflow_exp_1 = float(ce[(so == 1) & (sc == 3)].sum()) + wo_exp(1)
     inflow_exp_2 = float(ce[(so == 2) & (sc == 3)].sum()) + wo_exp(2)
     was2 = so == 2
+    wo2 = int(np.sum(opening.stage[p.written_off] == 2))
+    base2 = float(was2.sum()) + wo2
     entered = (so == 1) & (sc == 2)
     primary = closing.primary[p.ic]
     reasons: list[dict[str, Any]] = []
@@ -421,15 +437,16 @@ def staging_quality(
             "share_only_because_of_days_past_due": _share(float(ce[backstop].sum()), float(ce[entered].sum())),
         },
         "what_became_of_stage_2": {
-            "loans": int(was2.sum()),
-            "back_to_stage_1": _share(float(np.sum(was2 & (sc == 1))), float(was2.sum())),
-            "still_stage_2": _share(float(np.sum(was2 & (sc == 2))), float(was2.sum())),
-            "to_stage_3": _share(float(np.sum(was2 & (sc == 3))), float(was2.sum())),
+            "loans": int(base2),
+            "back_to_stage_1": _share(float(np.sum(was2 & (sc == 1))), base2),
+            "still_stage_2": _share(float(np.sum(was2 & (sc == 2))), base2),
+            "to_stage_3": _share(float(np.sum(was2 & (sc == 3))), base2),
+            "written_off": _share(float(wo2), base2),
         },
         "warnings": [],
     }
     r1, r2 = _share(d1, n1), _share(d2, n2)
-    if r1 is not None and r2 is not None and r2 <= r1:
+    if r1 is not None and r2 is not None and r2 <= r1 and inflow > 0:
         out["warnings"].append(
             f"stage 2 defaulted at {r2:.2%}, stage 1 at {r1:.2%}: stage 2 did not single out the riskier loans"
         )
@@ -478,9 +495,11 @@ def backtest(
         "base_scenario": _period_pd(opening.scenario_pd_12m[config.base_index], remaining, months),
     }
     if realised_z is not None:
+        if isinstance(realised_z, bool) or not isinstance(realised_z, (int, float)):
+            raise InputError("realised_z must be a number")
         z = float(realised_z)
-        if not math.isfinite(z):
-            raise InputError("realised_z must be finite")
+        if not math.isfinite(z) or abs(z) > MAX_Z:
+            raise InputError(f"realised_z must lie between -{MAX_Z:g} and {MAX_Z:g}")
         if all(s.z is None for s in config.scenarios):
             raise InputError("the opening settings have no scenario path, so a realised economy cannot be applied")
         known = dataclasses.replace(
@@ -540,8 +559,9 @@ def observed_migration(
     Rows are the grade at the opening date of loans that were not in stage 3; columns are the grade
     at the closing date, with default (stage 3 or written off) last. Loans that left, or that have no
     grade of this segment at the closing date, are left out and counted. A grade with no
-    observation keeps the row of the settings' matrix. With ``months`` other than 12 the matrix is
-    brought to one year through a fitted generator.
+    observation keeps the row of the settings' matrix (brought to the length of the period); without
+    a matrix in the settings it is assumed not to move. With ``months`` other than 12 the observed
+    matrix is brought to one year through a fitted generator.
     """
     if isinstance(months, bool) or not isinstance(months, int) or not 1 <= months <= 120:
         raise InputError("months must be a whole number between 1 and 120")
@@ -582,15 +602,26 @@ def observed_migration(
             matrix[g] = counts[g] / n[g]
             if n[g] < MIN_OBSERVATIONS:
                 warnings.append(f"grade {seg.grades[g]}: only {int(n[g])} observations")
-        elif seg.matrix is not None and months == MONTHS:
-            matrix[g] = seg.matrix[g]
+        elif seg.matrix is not None:
+            if months == MONTHS:
+                matrix[g] = seg.matrix[g]
+            else:  # the settings' matrix is annual: bring its row to the length of the observation period
+                with np_warnings.catch_warnings():
+                    np_warnings.simplefilter("ignore")
+                    shorter = transitions.generator(seg.matrix, seg.generator, tol=max(seg.matrix_tolerance, 1e-9))
+                matrix[g] = shorter.matrix(months / MONTHS)[g]
             warnings.append(f"grade {seg.grades[g]}: no observation, the row of the settings' matrix is kept")
         else:
             matrix[g, g] = 1.0
-            warnings.append(f"grade {seg.grades[g]}: no observation, the grade is assumed not to move")
+            warnings.append(
+                f"grade {seg.grades[g]}: no observation and no matrix in the settings; the grade is assumed not "
+                "to move, so its PD is zero"
+            )
     annual = matrix
     if months != MONTHS:
-        fitted = transitions.generator(matrix, seg.generator, tol=1e-9)
+        with np_warnings.catch_warnings():
+            np_warnings.simplefilter("ignore")
+            fitted = transitions.generator(matrix, seg.generator, tol=1e-9)
         annual = fitted.matrix(MONTHS / months)
         warnings.extend(f"annualising: {w}" for w in fitted.warnings)
     return {

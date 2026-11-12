@@ -258,7 +258,11 @@ def test_staging_quality_by_hand():
     assert q["stage_2_inflow"]["loans"] == 2
     assert q["stage_2_inflow"]["share_of_opening_stage_1_exposure"] == pytest.approx(2 / 11)
     assert q["stage_2_inflow"]["share_only_because_of_days_past_due"] == 1.0
-    assert q["what_became_of_stage_2"] == {"loans": 5, "back_to_stage_1": 0.2, "still_stage_2": 0.4, "to_stage_3": 0.4}
+    became = q["what_became_of_stage_2"]  # the same six loans as the default rate: five continuing, one written off
+    assert became["loans"] == q["default_rate_by_opening_stage"]["stage_2"]["loans"] == 6
+    assert [became[k] for k in ("back_to_stage_1", "still_stage_2", "to_stage_3", "written_off")] == pytest.approx(
+        [1 / 6, 2 / 6, 2 / 6, 1 / 6]
+    )
     assert q["warnings"] == []
 
 
@@ -268,6 +272,13 @@ def test_staging_quality_warns_when_stage_2_is_not_riskier():
     q = period.staging_quality(run(before), run(after))
     assert q["stage_3_inflow"]["share_directly_from_stage_1"] == 1.0
     assert len(q["warnings"]) == 1 and "did not single out" in q["warnings"][0]
+
+
+def test_no_defaults_no_warning_about_stage_2():
+    q = period.staging_quality(
+        run([loan("a"), loan("b"), loan("c", dpd=45)]), run([loan("a"), loan("b"), loan("c", dpd=45)])
+    )
+    assert q["warnings"] == [] and q["stage_3_inflow"]["loans"] == 0
 
 
 def test_backtest_by_hand():
@@ -286,6 +297,9 @@ def test_backtest_by_hand():
             period.backtest(opening, closing, months=bad)
     with pytest.raises(InputError, match="no scenario path"):
         period.backtest(opening, closing, realised_z=-1.0)
+    for bad in (True, "x", 1e300, float("nan")):
+        with pytest.raises(InputError, match="realised_z"):
+            period.backtest(opening, closing, realised_z=bad)
 
 
 def test_backtest_splits_forecast_error_from_model_error():
@@ -361,6 +375,43 @@ def test_observed_migration_counts():
     assert np.array(half["annual_matrix"]) == pytest.approx(squared, abs=2e-3)
     with pytest.raises(InputError, match="no grades"):
         period.observed_migration(opening, closing, "all")
+
+
+def test_a_grade_without_observations_keeps_its_pd_for_any_period_length():
+    """Half a year observed, nobody in grade B: B keeps the settings' row, shortened to half a year and back."""
+    before = [graded(f"A{i}", "A") for i in range(40)]
+    after = [graded(f"A{i}", "A") for i in range(40)] + [graded("NEW-B", "B")]
+    opening, closing = run(before, GRADED), run(after, GRADED)
+    for months in (12, 6, 3):
+        o = period.observed_migration(opening, closing, "corp", months=months)
+        assert o["annual_pd_by_grade"]["B"] == pytest.approx(0.10, abs=2e-3)
+        assert any("grade B: no observation, the row of the settings' matrix is kept" in w for w in o["warnings"])
+    c = review.challenger(opening, closing, months=6)
+    assert c["observed"][0]["annual_pd_by_grade"]["B"] > 0.09
+
+
+def test_movement_across_a_change_of_rating_scale():
+    m2 = [[0.9, 0.08, 0.02], [0.1, 0.8, 0.1], [0, 0, 1]]
+    both = {
+        "staging": {"relative_threshold": 2.0},
+        "segments": {"corp": {"grades": ["A", "B"], "matrix": m2}, "sme": {"grades": ["P", "Q"], "matrix": m2}},
+    }
+
+    def one(segment, grade):
+        return loan("X", segment=segment, pd="", pd_12m_origination="", grade=grade)
+
+    opening, closing = run([one("corp", "B")], both), run([one("sme", "P")], both)
+    m = period.movement(opening, closing)
+    t = table(m)
+    assert t["change_pd"][3] == pytest.approx(float(closing.ecl.sum() - opening.ecl.sum()))
+    assert m["largest_difference_between_rows_and_closing_balance"] < 1e-9
+    # the settings of the later date no longer know the old segment's matrix: the step is named
+    later = {"staging": {"relative_threshold": 2.0}, "segments": {"sme": {"grades": ["P", "Q"], "matrix": m2}}}
+    closing = run([one("sme", "P")], later)
+    with pytest.raises(InputError, match=r"after replacing settings .* try another order"):
+        period.movement(opening, closing)
+    again = period.movement(opening, closing, order=["pd", "other", "settings", "exposure", "lgd"])
+    assert again["change"] == pytest.approx(float(closing.ecl.sum() - opening.ecl.sum()))
 
 
 def test_observed_migration_small_and_empty_grades():
@@ -495,6 +546,9 @@ def test_response_curve(sample):
         review.response(closing.loans, cfg, scenario="boom")
     with pytest.raises(InputError, match="nothing to shift"):
         review.response(run([loan("a")]).loans, config.from_dict(PLAIN))
+    for bad in (["a"], None, [30.0], [float("nan")]):
+        with pytest.raises(InputError, match="shifts"):
+            review.response(closing.loans, cfg, shifts=bad)
 
 
 # --- individually assessed allowance in the portfolio run ------------------------------------
@@ -510,6 +564,9 @@ def test_individual_ecl_replaces_the_default_rate_in_stage_3():
     )
     assert r.ecl.tolist() == pytest.approx([612.5, 800.0, 9.0])
     assert any("individual_ecl but are not in stage 3" in w for w in r.warnings)
+    assert not any("larger than their exposure" in w for w in r.warnings)
+    over = run([loan("impaired", dpd=120, individual_ecl=5000.0)])
+    assert over.ecl.tolist() == [5000.0] and any("larger than their exposure" in w for w in over.warnings)
     one = engine.loan_detail(r, "impaired")
     assert one["ecl"] == 612.5 and one["measurement"] == "individually assessed allowance"
     assert engine.loan_detail(r, "impaired-rate")["measurement"] == "exposure x loss rate in default"
@@ -574,7 +631,13 @@ def test_command_line_for_two_dates(tmp_path, capsys):
     assert main(["response", f["loans.csv"], "--config", f["settings.json"], "--shifts", "a,b"]) == 2
     (tmp_path / "bad.csv").write_text("id\nx\n")
     assert main(["movement", *two, "--write-offs", str(tmp_path / "bad.csv")]) == 2
-    assert "error:" in capsys.readouterr().err
+    (tmp_path / "quote.csv").write_text('loan_id\n"' + "x" * 200_000)
+    assert main(["movement", *two, "--write-offs", str(tmp_path / "quote.csv")]) == 2
+    (tmp_path / "latin.json").write_bytes(b'\xff\xfe{"a": 1}')
+    assert main(["reconcile", f["loans.csv"], "--config", str(tmp_path / "latin.json")]) == 2
+    assert main(["movement", *two, "--write-offs", f["loans.csv"]]) == 2  # loans still in the closing file
+    err = capsys.readouterr().err
+    assert "error:" in err and "np.str_" not in err and "Traceback" not in err
 
 
 def test_write_off_file(tmp_path):

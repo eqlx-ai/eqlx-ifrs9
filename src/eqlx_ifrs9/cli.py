@@ -190,6 +190,12 @@ def main(argv: list[str] | None = None) -> int:
     except (InputError, FileNotFoundError, NotADirectoryError, IsADirectoryError, PermissionError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except UnicodeDecodeError as exc:
+        print(f"error: a file is not UTF-8 text ({exc.reason})", file=sys.stderr)
+        return 2
+    except RecursionError:
+        print("error: a file is nested too deeply to read", file=sys.stderr)
+        return 2
 
 
 def _dispatch(args: argparse.Namespace) -> int:

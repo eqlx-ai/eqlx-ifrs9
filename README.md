@@ -189,7 +189,7 @@ Three more questions use the same two files:
 
 | Command | Question | In the sample |
 |---|---|---|
-| `ifrs9 staging-quality` | Did stage 2 warn before stage 3? | 42 loans went to stage 3, 8 of them straight from stage 1; default rate 0.54% in stage 1 against 18.4% in stage 2; 4.2% of stage 2 went back to stage 1 |
+| `ifrs9 staging-quality` | Did stage 2 warn before stage 3? | 42 loans went to stage 3, 8 of them straight from stage 1; default rate 0.54% in stage 1 against 18.4% in stage 2; 3.8% of stage 2 went back to stage 1 |
 | `ifrs9 backtest` | Did the PDs hold? | 62.9 defaults expected, 42 happened; with the economy that occurred (`--realised-z -0.6`) the same PDs give 82.3, so the forecast was off by -19.4 and the model by +40.3 |
 | `ifrs9 challenger` | What if the rating migration of the year is used instead of the matrix in the settings? | corporate allowance 98,807,221 against 93,725,370 reported: +5.4%, explain (380 loans observed) |
 
@@ -223,7 +223,7 @@ Four approaches, one per scenario, with probabilities that add up to 1:
 | `gone_concern` | the business stops, collateral is sold | sale price less market price discount, selling and holding costs, discounted; claims ranking first are served before the lender |
 | `steady_state` | the business continues, no reliable plan | one sustainable year of cash flow (EBITDA less tax, owner's pay, required capex) times a multiple |
 | `two_step` | the business continues, a yearly plan exists | cash flow year by year plus a terminal value |
-| `market_price` | the loan has an observable price | price times gross carrying amount |
+| `market_price` | the loan has an observable price | price times the exposure |
 
 In the going-concern approaches the cash is shared among all creditors by seniority rank (equal ranks
 pro rata), and collateral that the business needs to operate is not sold. The recoverable amount of an

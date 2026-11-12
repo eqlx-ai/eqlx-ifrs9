@@ -344,6 +344,30 @@ def test_mcp_review_and_two_dates(root):
     ]
 
 
+def test_mcp_says_why_input_was_refused(root):
+    server = build_server(root)
+    two = {"opening_loans": "loans_previous.csv", "closing_loans": "loans.csv", "closing_settings": "settings.json"}
+
+    def reason(tool, args):
+        res = call(server, tool, args)
+        assert res.is_error
+        return " ".join(c.text for c in res.content)
+
+    assert "months must be a whole number between 1 and 12" in reason("backtest_defaults", {**two, "months": 13})
+    assert "unknown key" in reason("assess_individual", {"case": "settings.json"})
+    assert "neither reported_stage nor reported_ecl" in reason(
+        "reconcile_reported", {"loans": "loans_previous.csv", "settings": "settings_previous.json"}
+    )
+    assert "outside the allowed folder" in reason("describe_loans", {"loans": "../outside.csv"})
+    assert "file not found" in reason("run_portfolio", {"loans": "nothing.csv"})
+    assert "unknown loan_id" in reason(
+        "explain_loan", {"loans": "loans.csv", "settings": "settings.json", "loan_id": "X"}
+    )
+    assert "haircut must be at most 1" in reason(
+        "collateral_recovery", {"value": 1, "eir": 0.1, "years_to_sale": 1, "haircut": 2}
+    )
+
+
 def test_mcp_individual_assessment(root):
     from eqlx_ifrs9 import individual
 

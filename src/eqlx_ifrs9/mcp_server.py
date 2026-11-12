@@ -10,12 +10,15 @@ Start it with ``ifrs9 mcp --root /path/to/folder`` (needs ``pip install 'eqlx-if
 
 from __future__ import annotations
 
+import functools
 import json
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, ParamSpec, TypeVar
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from . import __version__, calc, config, data, engine, individual, period, report, review
@@ -29,6 +32,27 @@ MAX_SETTINGS_BYTES = 5_000_000
 
 class OutsideRootError(ValueError):
     pass
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _told(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Refused input comes back to the agent with its reason instead of a bare failure."""
+
+    @functools.wraps(fn)
+    def inner(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        try:
+            return fn(*args, **kwargs)
+        except FileNotFoundError as exc:
+            raise ToolError(f"file not found: {exc}") from exc
+        except UnicodeDecodeError as exc:
+            raise ToolError("the file is not UTF-8 text") from exc
+        except (InputError, OutsideRootError, IsADirectoryError, NotADirectoryError, RecursionError) as exc:
+            raise ToolError(str(exc) or type(exc).__name__) from exc
+
+    return inner
 
 
 def _resolve(root: Path, path: str) -> Path:
@@ -124,6 +148,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
     )
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def list_files(path: str = ".") -> list[dict[str, Any]]:
         """List the loan files (.csv) and settings files (.json) under a path in the allowed folder."""
         p = _resolve(root, path)
@@ -138,12 +163,14 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return out
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def describe_loans(loans: str) -> dict[str, Any]:
         """What a loan file contains before any calculation: number of loans and borrowers, columns,
         totals, segments, days-past-due buckets, and gaps such as loans without origination risk."""
         return report.describe(runs.get_loans(loans)[1])
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def run_portfolio(
         loans: str, settings: str | None = None, overrides: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -158,6 +185,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return report.summary(runs.run(loans, settings, overrides))
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def list_loans(
         loans: str,
         settings: str | None = None,
@@ -186,6 +214,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         )
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def explain_loan(
         loans: str,
         loan_id: str,
@@ -199,6 +228,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return engine.loan_detail(runs.run(loans, settings, overrides), loan_id, periods=periods)
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def compare_settings(
         loans: str, changes: dict[str, Any], settings: str | None = None, limit: int = 20
     ) -> dict[str, Any]:
@@ -212,6 +242,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return {"changed_settings": changes, **report.compare(before, after, limit)}
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def calculate_ecl(
         balance: float,
         lgd: float,
@@ -260,6 +291,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         )
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def pd_term_structure(
         matrix: list[list[float]],
         years: int,
@@ -277,6 +309,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         )
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def provision_matrix(
         gross_carrying_amount: list[float], loss_rate: list[float], buckets: list[str] | None = None
     ) -> dict[str, Any]:
@@ -285,6 +318,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return calc.provision_matrix(gross_carrying_amount, loss_rate, buckets)
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def reconcile_reported(
         loans: str, settings: str | None = None, overrides: dict[str, Any] | None = None, limit: int = 20
     ) -> dict[str, Any]:
@@ -297,6 +331,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return review.reconcile(runs.run(loans, settings, overrides), limit=limit)
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def scenario_response(
         loans: str,
         settings: str | None = None,
@@ -325,6 +360,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return opening, closing, gone
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def allowance_movement(
         opening_loans: str,
         closing_loans: str,
@@ -339,12 +375,13 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         IFRS 7 35H table): transfers between stages, remeasurement on transfer, new loans, derecognised loans,
         write-offs, and the change of continuing loans split into drivers (settings and scenarios, exposure
         and time, PD, LGD, other) by replacing one group of inputs at a time in `order`. The rows add up to
-        the closing balance exactly. `largest_changes` lists the loans behind the change with their drivers.
+        the closing balance. `largest_changes` lists the loans behind the change with their drivers.
         `write_offs` is a CSV with a loan_id column; `opening_settings` defaults to `closing_settings`."""
         opening, closing, gone = two_dates(opening_loans, closing_loans, closing_settings, opening_settings, write_offs)
         return period.movement(opening, closing, write_offs=gone, order=order or period.DRIVERS, limit=limit)
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def staging_quality(
         opening_loans: str,
         closing_loans: str,
@@ -360,6 +397,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return period.staging_quality(opening, closing, write_offs=gone)
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def backtest_defaults(
         opening_loans: str,
         closing_loans: str,
@@ -377,6 +415,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return period.backtest(opening, closing, write_offs=gone, months=months, realised_z=realised_z)
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def challenger_matrix(
         opening_loans: str,
         closing_loans: str,
@@ -394,6 +433,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return review.challenger(opening, closing, write_offs=gone, months=months)
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def assess_individual(case: str) -> dict[str, Any]:
         """Allowance of one credit-impaired debtor assessed individually, from a case file (.json) in the
         allowed folder. The case lists the debtor, the lender's exposures (gross carrying amount, effective
@@ -413,6 +453,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         return individual.assess(raw)
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def collateral_recovery(
         value: float,
         eir: float,
@@ -447,6 +488,7 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         )
 
     @server.tool(annotations=READ_ONLY)
+    @_told
     def turkey_reclassification_check(
         check: Literal["performing_again", "restructured_npl_to_group_2", "exit_restructured_status"],
         facts: dict[str, Any],
