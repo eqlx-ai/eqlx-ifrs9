@@ -83,6 +83,37 @@ you give it, and it is not an accounting opinion, an audit or a validated model.
   A loan leaving stage 3 passes through stage 2 for the probation period.
 - "Primary reason" depends on the order of precedence, which is a setting.
 
+## Individual assessment
+
+- **Judgement stays with you.** Whether the business survives, how likely each scenario is, what the
+  collateral is worth, how long a sale takes and how the claims rank in law are inputs. The tool does
+  the arithmetic and says where an input departs from a published expectation.
+- **The warnings are ECB expectations**, from the asset quality review manual (2018) and the guidance
+  on non-performing loans (2017): multiples of 6, 10 and 12, a discount of at least 10% in an auction,
+  18 months past due, valuations within 12 months. They are not rules of IFRS 9 and not rules of any
+  other supervisor. They never change a result.
+- **Not linked to the portfolio run.** `ifrs9 run` still measures stage 3 as exposure times
+  `lgd_default`. Take the allowance from the case and put it into the rate, or report it separately.
+- **Annual steps** in the two-step approach; cash is assumed to arrive at the end of each year.
+  Collateral sales and other dated flows can fall at any fraction of a year.
+- **Claims are nominal.** Other creditors' claims and the lender's exposures do not accrue interest
+  while cash is shared; a negative cash flow year pays nobody and is not carried forward. Expected
+  drawings of undrawn lines are given by you, with their year.
+- **Steady state** treats the multiple as the present value: the amount is shared at once and not
+  discounted again. A negative sustainable cash flow counts as zero.
+- **Collateral and the waterfall are separate.** Proceeds from collateral are added to an exposure's
+  share of the cash flows; they do not reduce the claim that takes part in the sharing, and collateral
+  worth more than its exposure does not flow to other exposures. The total is capped at the exposure.
+- **Prior claims on collateral** are deducted from the present value of the net proceeds, then the
+  rest is shared with equal-ranking claims in proportion to the amounts owed (or by the `share` you
+  give).
+- **One collateral item securing several exposures** is split by the fractions you give, and each part
+  is discounted at that exposure's own effective interest rate, not at a weighted average rate.
+- **The allowance is split** between the loan and the undrawn commitment in proportion to the gross
+  carrying amount and the present value of expected drawings.
+- Groups of connected debtors, several currencies, guarantees as a separate source of recovery and
+  purchased or originated credit-impaired assets are not covered.
+
 ## Turkey profile
 
 - It encodes the mechanical part of the BDDK provisioning regulation as amended up to 24 May 2022:

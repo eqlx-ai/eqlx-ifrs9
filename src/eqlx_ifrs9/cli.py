@@ -1,4 +1,4 @@
-"""Command line: ``ifrs9 run | loan | list | compare | describe | ecl | sample | mcp``."""
+"""Command line: ``ifrs9 run | loan | list | compare | describe | ecl | individual | sample | mcp``."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__, calc, config, data, engine, report, synthetic
+from . import __version__, calc, config, data, engine, individual, report, synthetic
 from .errors import InputError
 from .staging import Reason, names
 
@@ -37,6 +37,17 @@ def load_run(loans_path: str, config_path: str | None, overrides: dict[str, Any]
             raise InputError(f"{config_path}: not valid JSON ({exc})") from exc
     cfg = config.from_dict(config.with_overrides(raw, overrides) if overrides else raw)
     return engine.run(data.read_csv(loans_path), cfg)
+
+
+def read_case(path: str | Path) -> dict[str, Any]:
+    """A case file for the individual assessment."""
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise InputError(f"{path}: not valid JSON ({exc})") from exc
+    if not isinstance(raw, dict):
+        raise InputError(f"{path}: the case must be a JSON object")
+    return raw
 
 
 def write_results(r: engine.PortfolioResult, path: str) -> None:
@@ -119,6 +130,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--timing", default="end", choices=("end", "mid"))
     s.add_argument("--periods", action="store_true")
 
+    s = sub.add_parser("individual", help="allowance of one credit-impaired debtor from a case file")
+    s.add_argument("case", help="case file (JSON): debtor, exposures, other claims, collateral, scenarios")
+
     s = sub.add_parser("sample", help="write a made-up portfolio with known answers")
     s.add_argument("directory")
     s.add_argument("--loans", type=int, default=2000)
@@ -165,10 +179,14 @@ def _dispatch(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    if cmd == "individual":
+        _emit(individual.assess(read_case(args.case)))
+        return 0
     if cmd == "sample":
         out = Path(args.directory)
         out.mkdir(parents=True, exist_ok=True)
-        existing = [f for f in ("loans.csv", "settings.json", "planted_cases.json") if (out / f).exists()]
+        cases = synthetic.individual_cases()
+        existing = [f for f in ("loans.csv", "settings.json", "planted_cases.json", *cases) if (out / f).exists()]
         if existing and not args.force:
             raise InputError(f"{', '.join(existing)} already exist in {out}; use --force to overwrite")
         sample = synthetic.generate(args.loans, args.seed, None if args.no_profile else "tr_bddk")
@@ -177,7 +195,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         (out / "planted_cases.json").write_text(
             json.dumps([p.__dict__ for p in sample.planted], indent=2) + "\n", encoding="utf-8"
         )
-        print(f"wrote loans.csv, settings.json and planted_cases.json to {out}")
+        for name, case in cases.items():
+            (out / name).write_text(json.dumps(case, indent=2) + "\n", encoding="utf-8")
+        print(f"wrote loans.csv, settings.json, planted_cases.json and {len(cases)} case files to {out}")
         return 0
 
     overrides = parse_overrides(args.set)

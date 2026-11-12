@@ -24,7 +24,13 @@ def run(capsys, *args):
 
 
 def test_sample_writes_three_files(folder):
-    assert sorted(p.name for p in folder.iterdir()) == ["loans.csv", "planted_cases.json", "settings.json"]
+    assert sorted(p.name for p in folder.iterdir()) == [
+        "case_going_concern.json",
+        "case_gone_concern.json",
+        "loans.csv",
+        "planted_cases.json",
+        "settings.json",
+    ]
     assert (folder / "loans.csv").read_text() == synthetic.generate(150, 7).csv
     assert len(json.loads((folder / "planted_cases.json").read_text())) == 11
 
@@ -192,6 +198,8 @@ TOOLS = {
     "pd_term_structure",
     "provision_matrix",
     "turkey_reclassification_check",
+    "assess_individual",
+    "collateral_recovery",
 }
 
 
@@ -209,7 +217,13 @@ def test_tools_are_read_only(root):
 def test_mcp_flow(root):
     server = build_server(root)
     files = call(server, "list_files", {}).structured_content["result"]
-    assert [f["path"] for f in files] == ["loans.csv", "planted_cases.json", "settings.json"]  # no symlink, no .txt
+    assert [f["path"] for f in files] == [  # no symlink, no .txt
+        "case_going_concern.json",
+        "case_gone_concern.json",
+        "loans.csv",
+        "planted_cases.json",
+        "settings.json",
+    ]
     assert call(server, "describe_loans", {"loans": "loans.csv"}).structured_content["loans"] == 161
     args = {"loans": "loans.csv", "settings": "settings.json"}
     table = call(server, "run_portfolio", args).structured_content
@@ -227,6 +241,8 @@ def test_mcp_flow(root):
     ).structured_content
     assert looser["total"]["ecl"] == pytest.approx(cmp_["ecl_after"])
     assert not (root / "result.csv").exists() and sorted(p.name for p in root.iterdir()) == [
+        "case_going_concern.json",
+        "case_gone_concern.json",
         "link_out.csv",
         "loans.csv",
         "notes.txt",
@@ -265,6 +281,44 @@ def test_mcp_calculators(root):
         },
     ).structured_content
     assert tr["eligible"] is False and "7(8)" in tr["unmet"][0]
+
+
+def test_mcp_individual_assessment(root):
+    from eqlx_ifrs9 import individual
+
+    server = build_server(root)
+    for name, case in synthetic.individual_cases().items():
+        got = call(server, "assess_individual", {"case": name}).structured_content
+        assert got == json.loads(json.dumps(individual.assess(case)))
+    npl = call(
+        server,
+        "collateral_recovery",
+        {
+            "value": 200,
+            "eir": 0.05,
+            "years_to_sale": 5,
+            "haircut": 0.10,
+            "selling_cost_rate": 0.10,
+            "annual_cost_rate": 0.05,
+        },
+    ).structured_content
+    assert round(npl["present_value"]) == 84  # ECB guidance on non-performing loans, 7.4.3
+    aqr = call(
+        server,
+        "collateral_recovery",
+        {
+            "value": 240,
+            "eir": 0.05,
+            "years_to_sale": 2,
+            "haircut": 0.0,
+            "costs": [{"year": 1, "amount": 12}, {"year": 2, "amount": 24}],
+            "share": 0.4,
+        },
+    ).structured_content
+    assert round(aqr["recoverable"], 2) == 73.80  # ECB AQR manual, 4.6.3
+    for bad in ("../outside.csv", "link_out.csv", "loans.csv", "settings.json", "missing.json", "/etc/passwd"):
+        assert call(server, "assess_individual", {"case": bad}).is_error
+    assert call(server, "collateral_recovery", {"value": 1, "eir": 0.1, "years_to_sale": 1, "haircut": 2}).is_error
 
 
 def test_mcp_cache_follows_file_changes(root):

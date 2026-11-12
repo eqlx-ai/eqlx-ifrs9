@@ -1,7 +1,8 @@
 # eqlx-ifrs9
 
 Deterministic IFRS 9 expected credit loss: PD term structures, stage allocation, 12-month and
-lifetime ECL, scenario weighting, the provision matrix, and a rule profile for Turkey (BDDK).
+lifetime ECL, scenario weighting, the provision matrix, the individual assessment of credit-impaired
+debtors, and a rule profile for Turkey (BDDK).
 A Python library, a command line tool and a read-only MCP server for AI agents.
 
 It computes. It does not estimate PD or LGD models and it does not forecast the economy: PDs, LGDs,
@@ -92,6 +93,56 @@ The first command explains a loan that is not past due itself and still sits in 
 }
 ```
 
+## One debtor, assessed individually
+
+A large non-performing loan is not provisioned with a portfolio rate. Someone works out what can still
+be collected from this debtor: from the business if it survives, from the collateral if it does not.
+That file is usually a spreadsheet. Here it is a case file (JSON) and one command; `ifrs9 sample`
+writes two made-up cases.
+
+```bash
+ifrs9 individual demo/case_gone_concern.json
+```
+
+A project loan of 95,000,000 at an effective interest rate of 35%, secured by land valued at
+120,000,000 with a tax claim of 10,000,000 ranking first:
+
+| Scenario | Probability | Sale after | Market price discount | Recoverable today | Shortfall |
+|---|---|---|---|---|---|
+| sale as planned | 60% | 3 years | 15% | 26,238,073 | 68,761,927 |
+| slow market (value down 10%) | 40% | 4 years | 30% | 8,115,271 | 86,884,729 |
+
+Allowance: 76,011,047, which is 80.0% of the loan. Most of the loss is time: three years at 35% turn
+120,000,000 into 48,773,053 before any discount or cost. The output lists every cash flow with its
+year and present value.
+
+Four approaches, one per scenario, with probabilities that add up to 1:
+
+| Approach | When | What is computed |
+|---|---|---|
+| `gone_concern` | the business stops, collateral is sold | sale price less market price discount, selling and holding costs, discounted; claims ranking first are served before the lender |
+| `steady_state` | the business continues, no reliable plan | one sustainable year of cash flow (EBITDA less tax, owner's pay, required capex) times a multiple |
+| `two_step` | the business continues, a yearly plan exists | cash flow year by year plus a terminal value |
+| `market_price` | the loan has an observable price | price times gross carrying amount |
+
+In the going-concern approaches the cash is shared among all creditors by seniority rank (equal ranks
+pro rata), and collateral that the business needs to operate is not sold. The recoverable amount of an
+exposure is never more than the exposure. Warnings name the published supervisory expectation that an
+input departs from: a going-concern estimate more than 18 months past due, a discount below 10% in an
+auction, a valuation older than 12 months, a multiple above the benchmark, a single scenario.
+
+```python
+from eqlx_ifrs9 import individual
+
+# Property worth 200, sold in five years: 10% discount, 10% selling costs, 5% upkeep a year, EIR 5%.
+individual.collateral_recovery(200, 0.05, years_to_sale=5, haircut=0.10, selling_cost_rate=0.10, annual_cost_rate=0.05)[
+    "present_value"
+]  # 83.64
+```
+
+This part is on the main branch and not yet in the PyPI release:
+`pip install "git+https://github.com/eqlx-ai/eqlx-ifrs9"`.
+
 ## As a library
 
 ```python
@@ -118,8 +169,8 @@ r.stage[0], r.reason_names(0), r.pd_ratio[0]  # 2, ['pd_relative'], 2.08
 
 Modules: `curves` (PD term structures), `transitions` (rating matrices, generators, cycle shift),
 `cycle` (one-factor point-in-time adjustment), `schedule` (repayment and exposure), `lgd`
-(collateral, workout, credit-impaired assets), `ecl`, `staging`, `scenarios`, `simplified`
-(provision matrix), `profiles.tr_bddk`, and for whole portfolios `data`, `config`, `engine`,
+(collateral, workout, credit-impaired assets), `individual` (one debtor: going and gone concern),
+`ecl`, `staging`, `scenarios`, `simplified` (provision matrix), `profiles.tr_bddk`, and for whole portfolios `data`, `config`, `engine`,
 `report`.
 
 ## For AI agents (MCP)
@@ -142,6 +193,8 @@ confined to that folder; nothing is written and nothing leaves the machine.
 | `calculate_ecl` | 12-month and lifetime ECL of one instrument from plain numbers |
 | `pd_term_structure` | cumulative PD by grade from a transition matrix, with generator diagnostics |
 | `provision_matrix` | simplified approach for trade receivables |
+| `assess_individual` | allowance of one credit-impaired debtor from a case file, per exposure and scenario |
+| `collateral_recovery` | present value of selling one collateral item, flow by flow |
 | `turkey_reclassification_check` | BDDK conditions for moving a loan back up, with article numbers |
 
 ## Input
@@ -156,6 +209,13 @@ reversion after the forecast horizon, segment parameters (asset correlation, pre
 transition matrix), calculation conventions and an optional profile. `ifrs9 sample` writes a
 complete example; [`eqlx_ifrs9/config.py`](src/eqlx_ifrs9/config.py) documents every key.
 Unknown keys and out-of-range values are rejected.
+
+**Case file** (JSON, one debtor, for `ifrs9 individual`). `debtor` (id, and optionally sector, months
+past due, EBITDA of the last years), `exposures` (gross carrying amount, effective interest rate,
+seniority rank, expected drawings), `other_claims` (rank and amount), `collateral` (value, the exposure
+it secures, whether the business needs it to operate, sale assumptions, claims ranking before or
+beside the lender) and `scenarios` (probability, approach, and what that approach needs; a scenario
+can change the sale assumptions of a collateral item). `ifrs9 sample` writes two complete examples.
 
 ## How it is verified
 
@@ -172,6 +232,11 @@ Unknown keys and out-of-range values are rejected.
 | One-factor shift | the average over the cycle returns the long-run PD and matrix (numerical integration) |
 | Portfolio run | every loan recomputed with the scalar functions; independence of row order and chunking |
 | Turkey profile | article by article against the regulation text; contagion against direct enumeration |
+| Collateral sale, shared lien | ECB asset quality review manual 4.6.3: proceeds 73.80, ECL 26.20 |
+| Collateral sale with upkeep | ECB guidance on non-performing loans 7.4.3: present value 84, impairment 216 |
+| Sustainable cash flow | ECB manual 4.6.6: 7,746, times a multiple of 6 = 46,476 |
+| Sharing by seniority | ECB manual 4.6.6.2: 5 from cash flow plus 3 from pledged bonds, impairment 7 |
+| Yearly plan with an undrawn line | ECB manual 4.6.7: recoverable 141.70, ECL 103.50 (84.40 loan, 19.10 commitment) |
 
 The illustrative examples do not cover multi-period discounting, several scenarios or a numeric
 staging threshold. Those parts rest on the closed forms, the enumeration and the simulation.
@@ -184,7 +249,8 @@ in its last period, and comparing today's remaining-life PD with the full-life P
 This is a calculation tool, not an accounting opinion and not a validated model. It covers the
 impairment arithmetic of IFRS 9 Section 5.5 for loans, undrawn commitments and trade receivables.
 It does not cover classification and measurement, hedge accounting, purchased or originated
-credit-impaired assets, or the allowance movement table. See [LIMITS.md](LIMITS.md) before relying
+credit-impaired assets, or the allowance movement table. The individual assessment does the
+arithmetic of a recovery estimate; it does not judge a business plan or value a property. See [LIMITS.md](LIMITS.md) before relying
 on a number.
 
 ## References
@@ -197,6 +263,8 @@ on a number.
   credit losses*.
 - European Banking Authority (2021, 2023), *IFRS 9 implementation by EU institutions*, monitoring
   reports; ECB Banking Supervision, letter of 4 December 2020 on credit risk identification.
+- European Central Bank (2018), *Asset Quality Review, Phase 2 Manual*, section 4.6; (2017), *Guidance
+  to banks on non-performing loans*, sections 6.2 and 7.4.
 - BDDK, *Kredilerin Sınıflandırılması ve Bunlar İçin Ayrılacak Karşılıklara İlişkin Usul ve Esaslar
   Hakkında Yönetmelik*, Official Gazette 22 June 2016, no. 29750, as amended.
 - Vasicek, O. (2002), "The distribution of loan portfolio value", *Risk*.

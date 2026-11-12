@@ -5,7 +5,21 @@ scenario paths and policy thresholds are inputs, and every convention the standa
 (period length, timing of default, staging thresholds) is an explicit parameter.
 """
 
-from . import calc, config, cycle, data, engine, lgd, report, scenarios, schedule, simplified, staging, transitions
+from . import (
+    calc,
+    config,
+    cycle,
+    data,
+    engine,
+    individual,
+    lgd,
+    report,
+    scenarios,
+    schedule,
+    simplified,
+    staging,
+    transitions,
+)
 from .curves import PDCurve
 from .ecl import ECLResult, discount_factors, expected_credit_loss, loss_rate_ecl
 from .errors import InputError
@@ -26,6 +40,7 @@ __all__ = [
     "discount_factors",
     "engine",
     "expected_credit_loss",
+    "individual",
     "lgd",
     "loss_rate_ecl",
     "report",

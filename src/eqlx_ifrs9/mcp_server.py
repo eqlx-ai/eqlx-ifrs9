@@ -1,6 +1,6 @@
 """MCP server: lets an AI agent run IFRS 9 expected credit loss calculations on files in one folder.
 
-Read-only by construction. The tools read loan files (CSV) and settings files (JSON) inside the
+Read-only by construction. The tools read loan files (CSV), settings and case files (JSON) inside the
 ``--root`` folder given at start-up; paths are resolved, so ``..`` and symlinks cannot leave it.
 Nothing is written and nothing is sent anywhere; results go back to the agent that asked. The
 calculator tools take plain numbers and touch no file at all.
@@ -18,7 +18,7 @@ from typing import Any, Literal
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from . import __version__, calc, config, data, engine, report
+from . import __version__, calc, config, data, engine, individual, report
 from .errors import InputError
 from .profiles import tr_bddk
 
@@ -109,6 +109,9 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
             "`describe_loans`, then `run_portfolio`; use `list_loans` and `explain_loan` to look at individual "
             "loans and `compare_settings` to see what a different threshold or weight would change. "
             "`calculate_ecl`, `pd_term_structure` and `provision_matrix` are calculators that need no file. "
+            "For one credit-impaired debtor assessed individually, `assess_individual` reads a case file (JSON: "
+            "debtor, exposures, other claims, collateral, scenarios with probabilities) and returns the "
+            "allowance per exposure with every step; `collateral_recovery` is the calculator for one item. "
             "Everything is deterministic arithmetic on the inputs: the tool does not estimate PDs or forecast "
             "the economy, and thresholds are the user's policy. Quote the numbers the tools return, say which "
             "settings produced them, and pass on the warnings."
@@ -275,6 +278,59 @@ def build_server(root: Path, max_rows: int = 5_000_000) -> MCPServer:
         """Simplified approach for trade receivables: allowance per days-past-due bucket as gross carrying
         amount times lifetime loss rate, with totals and coverage."""
         return calc.provision_matrix(gross_carrying_amount, loss_rate, buckets)
+
+    @server.tool(annotations=READ_ONLY)
+    def assess_individual(case: str) -> dict[str, Any]:
+        """Allowance of one credit-impaired debtor assessed individually, from a case file (.json) in the
+        allowed folder. The case lists the debtor, the lender's exposures (gross carrying amount, effective
+        interest rate, seniority rank), the other creditors' claims, the collateral with its sale assumptions,
+        and scenarios with probabilities: `gone_concern` (collateral is sold), `steady_state` (one sustainable
+        year of cash flow times a multiple), `two_step` (yearly projection plus terminal value) or
+        `market_price`. Returns, per exposure and scenario, the cash flow value, collateral value, recoverable
+        amount and shortfall, the probability-weighted allowance, and warnings where the inputs depart from
+        published supervisory expectations. `ifrs9 sample` writes two example case files."""
+        p = runs.file(case, ".json")
+        if p.stat().st_size > MAX_SETTINGS_BYTES:
+            raise InputError("the case file is too large")
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise InputError(f"{case}: not valid JSON ({exc})") from exc
+        return individual.assess(raw)
+
+    @server.tool(annotations=READ_ONLY)
+    def collateral_recovery(
+        value: float,
+        eir: float,
+        years_to_sale: float,
+        haircut: float,
+        value_change: float = 0.0,
+        selling_cost_rate: float = 0.0,
+        annual_cost_rate: float = 0.0,
+        costs: list[dict[str, float]] | None = None,
+        income: list[dict[str, float]] | None = None,
+        prior_claims: float = 0.0,
+        share: float = 1.0,
+    ) -> dict[str, Any]:
+        """Present value of selling one collateral item and the part that belongs to the lender. The item is
+        sold `years_to_sale` years from now at `value * (1 + value_change)`, less the market price discount
+        (`haircut`), selling costs (rate on the discounted price) and a yearly holding cost (rate on `value`);
+        `costs` and `income` are lists of {"year", "amount"}. Flows are discounted at `eir`, the loan's
+        effective interest rate. Claims ranking before the lender (`prior_claims`) are served first; `share`
+        is the lender's part of what is left. Rates are fractions (0.10 for 10%)."""
+        return individual.collateral_recovery(
+            value,
+            eir,
+            years_to_sale=years_to_sale,
+            haircut=haircut,
+            value_change=value_change,
+            selling_cost_rate=selling_cost_rate,
+            annual_cost_rate=annual_cost_rate,
+            costs=costs or [],
+            income=income or [],
+            prior_claims=prior_claims,
+            share=share,
+        )
 
     @server.tool(annotations=READ_ONLY)
     def turkey_reclassification_check(
